@@ -300,6 +300,30 @@ def score_candidate(candidate, target_distance):
     return distance_error_pct + reuse_pct, distance_error_pct, reuse_pct
 
 
+def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_candidates=6,
+                         profile="foot", penalty_multiplier=DEFAULT_REUSE_PENALTY_MULTIPLIER,
+                         max_radius_iterations=DEFAULT_MAX_RADIUS_ITERATIONS,
+                         distance_tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT):
+    """Build and score every candidate for the given start point/target
+    distance, one per bearing evenly spread from `bearing`. Returns
+    (candidates_sorted_best_first, bearings_tried) -- candidates may be
+    fewer than bearings_tried if some failed (see build_candidate).
+
+    This is the reusable core the CLI (main, below) and the HTTP wrapper
+    (route_api.py) both call -- no argparse or printing in here."""
+    bearings = [bearing + i * (360 / num_candidates) for i in range(num_candidates)]
+    candidates = []
+    for b in bearings:
+        c = build_candidate(base_url, lat, lon, b, target_distance, profile,
+                             penalty_multiplier, max_radius_iterations, distance_tolerance_pct)
+        if c is not None:
+            score, distance_error_pct, reuse_pct = score_candidate(c, target_distance)
+            c["score"], c["distance_error_pct"], c["reuse_pct"] = score, distance_error_pct, reuse_pct
+            candidates.append(c)
+    candidates.sort(key=lambda c: c["score"])
+    return candidates, bearings
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--lat", type=float, required=True, help="Start latitude")
@@ -319,27 +343,20 @@ def main():
     parser.add_argument("--output", help="Write the top candidates as a GeoJSON FeatureCollection to this file")
     args = parser.parse_args()
 
-    bearings = [args.bearing + i * (360 / args.candidates) for i in range(args.candidates)]
-
     print(f"start:            {args.lat}, {args.lon}")
     print(f"target distance:  {args.distance:.0f} m")
+
+    candidates, bearings = generate_candidates(
+        args.graphhopper_url, args.lat, args.lon, args.distance, args.bearing, args.candidates,
+        args.profile, args.penalty_multiplier, args.max_radius_iterations, args.distance_tolerance_pct,
+    )
     print(f"candidates:       {args.candidates} (bearings: {', '.join(f'{b:.0f}°' for b in bearings)})")
     print()
-
-    candidates = []
-    for bearing in bearings:
-        c = build_candidate(args.graphhopper_url, args.lat, args.lon, bearing, args.distance, args.profile,
-                             args.penalty_multiplier, args.max_radius_iterations, args.distance_tolerance_pct)
-        if c is not None:
-            score, distance_error_pct, reuse_pct = score_candidate(c, args.distance)
-            c["score"], c["distance_error_pct"], c["reuse_pct"] = score, distance_error_pct, reuse_pct
-            candidates.append(c)
 
     if not candidates:
         print("error: no candidates succeeded", file=sys.stderr)
         sys.exit(1)
 
-    candidates.sort(key=lambda c: c["score"])
     top = candidates[:args.top_n]
     top_set = {id(c) for c in top}
 
