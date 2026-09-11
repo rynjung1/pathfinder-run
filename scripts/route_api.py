@@ -90,5 +90,12 @@ def health():
 if __name__ == "__main__":
     # Port 5001, not Flask's default 5000 -- macOS's AirPlay Receiver squats
     # on 5000 by default and the conflict is a known source of confusion.
+    #
+    # host="0.0.0.0": an iOS Simulator can reach 127.0.0.1 directly (it
+    # shares the host Mac's network stack), but a physical device running
+    # Expo Go cannot -- it needs the dev machine's LAN IP, which only
+    # resolves if this server is actually listening on all interfaces, not
+    # just loopback. Binding wide costs nothing on a local dev machine and
+    # avoids a second silent failure mode later.
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5001
-    app.run(port=port)
+    app.run(host="0.0.0.0", port=port)
