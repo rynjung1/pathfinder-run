@@ -1,0 +1,4 @@
+*.jar
+graphhopper/graph-cache/
+graph-cache/
+logs/
