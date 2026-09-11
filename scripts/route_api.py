@@ -55,10 +55,15 @@ def route():
     if distance <= 0:
         return jsonify({"error": "distance must be positive"}), 400
 
-    bearing = float(body.get("bearing", 0.0))
-    num_candidates = int(body.get("candidates", 6))
-    top_n = int(body.get("top_n", 3))
+    try:
+        bearing = float(body.get("bearing", 0.0))
+        num_candidates = int(body.get("candidates", 6))
+        top_n = int(body.get("top_n", 3))
+    except (TypeError, ValueError):
+        return jsonify({"error": "bearing, candidates, and top_n must be numeric"}), 400
     profile = body.get("profile", "foot")
+    if not isinstance(profile, str):
+        return jsonify({"error": "profile must be a string"}), 400
     if num_candidates < 1 or top_n < 1:
         return jsonify({"error": "candidates and top_n must be at least 1"}), 400
 
