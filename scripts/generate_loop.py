@@ -8,9 +8,13 @@ kept.
 Scope, deliberately narrow:
 - Candidates vary only by outbound bearing, spread evenly starting from
   --bearing. No park-proximity/"greenness" scoring (§5 point 1's second
-  bullet) and no returning multiple alternatives to a caller (§5 point 4's
-  "return 2-3 alternatives" is a mobile-client-facing concern for later --
-  this script only prints the comparison and keeps the single best one).
+  bullet) -- deferred, pending the custom_areas park-polygon extraction
+  work, along with the closures layer (both correctly v2+ per the doc).
+- Keeps and reports the top --top-n candidates by score (default 3, per §5
+  point 4's "return 2-3 alternatives"), not just the single best. This
+  script only prints the comparison and writes them as a GeoJSON
+  FeatureCollection -- actually serving alternatives to a caller is a
+  mobile-client-facing concern for later.
 - Each bearing's far-point radius is refined, not fixed: starting from
   target_distance / 2, it's rescaled by (target / actual) after each
   attempt and re-requested, up to --max-radius-iterations times or until
@@ -158,10 +162,11 @@ def combine_legs(outbound, return_leg):
     return out_coords + back_coords[1:]
 
 
-def path_to_geojson(candidate, start_lat, start_lon, target_distance_m):
+def candidate_to_feature(candidate, start_lat, start_lon, target_distance_m, rank):
     return {
         "type": "Feature",
         "properties": {
+            "rank": rank,
             "start": [start_lon, start_lat],
             "bearing_deg": candidate["bearing"],
             "target_distance_m": target_distance_m,
@@ -176,6 +181,18 @@ def path_to_geojson(candidate, start_lat, start_lon, target_distance_m):
             "type": "LineString",
             "coordinates": candidate["coords"],
         },
+    }
+
+
+def candidates_to_geojson(candidates, start_lat, start_lon, target_distance_m):
+    """A FeatureCollection of the top candidates, ranked 1..N -- §5 point 4's
+    "return 2-3 alternatives." Rank 1 is the lowest-scoring (best)."""
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            candidate_to_feature(c, start_lat, start_lon, target_distance_m, rank)
+            for rank, c in enumerate(candidates, start=1)
+        ],
     }
 
 
@@ -298,7 +315,8 @@ def main():
     parser.add_argument("--distance-tolerance-pct", type=float, default=DEFAULT_DISTANCE_TOLERANCE_PCT,
                          help=f"Stop refining a bearing's radius once within this %% of target distance (default: {DEFAULT_DISTANCE_TOLERANCE_PCT})")
     parser.add_argument("--graphhopper-url", default=DEFAULT_GRAPHHOPPER_URL, help=f"GraphHopper server base URL (default: {DEFAULT_GRAPHHOPPER_URL})")
-    parser.add_argument("--output", help="Write the best candidate as a GeoJSON Feature to this file")
+    parser.add_argument("--top-n", type=int, default=3, help="Number of top-scoring candidates to keep/return, per §5 point 4's '2-3 alternatives' (default: 3)")
+    parser.add_argument("--output", help="Write the top candidates as a GeoJSON FeatureCollection to this file")
     args = parser.parse_args()
 
     bearings = [args.bearing + i * (360 / args.candidates) for i in range(args.candidates)]
@@ -322,24 +340,28 @@ def main():
         sys.exit(1)
 
     candidates.sort(key=lambda c: c["score"])
-    best = candidates[0]
+    top = candidates[:args.top_n]
+    top_set = {id(c) for c in top}
 
     print(f"{'bearing':>8}  {'iters':>5}  {'distance_m':>10}  {'dist_err%':>9}  {'ways_out':>8}  {'reused':>6}  {'reuse%':>7}  {'score':>7}")
     for c in candidates:
-        marker = " <- best" if c is best else ""
+        rank = top.index(c) + 1 if id(c) in top_set else None
+        marker = f" <- #{rank}" if rank else ""
         print(f"{c['bearing']:>7.0f}°  {c['radius_iterations']:>5}  {c['total_distance']:>10.1f}  {c['distance_error_pct']:>8.1f}%  "
               f"{len(c['outbound_ways']):>8}  {len(c['reused']):>6}  {c['reuse_pct']:>6.1f}%  {c['score']:>7.1f}{marker}")
 
     print()
-    print(f"best candidate: bearing {best['bearing']:.0f}°, {best['total_distance']:.1f} m "
-          f"({100 * (best['total_distance'] - args.distance) / args.distance:+.1f}%), "
-          f"{len(best['reused'])}/{len(best['outbound_ways'])} ways reused")
+    print(f"top {len(top)} candidate(s):")
+    for rank, c in enumerate(top, start=1):
+        print(f"  #{rank}: bearing {c['bearing']:.0f}°, {c['total_distance']:.1f} m "
+              f"({100 * (c['total_distance'] - args.distance) / args.distance:+.1f}%), "
+              f"{len(c['reused'])}/{len(c['outbound_ways'])} ways reused, score {c['score']:.1f}")
 
     if args.output:
-        feature = path_to_geojson(best, args.lat, args.lon, args.distance)
+        collection = candidates_to_geojson(top, args.lat, args.lon, args.distance)
         with open(args.output, "w") as f:
-            json.dump(feature, f, indent=2)
-        print(f"wrote GeoJSON to {args.output}")
+            json.dump(collection, f, indent=2)
+        print(f"wrote {len(top)} candidate(s) as GeoJSON to {args.output}")
 
 
 if __name__ == "__main__":
