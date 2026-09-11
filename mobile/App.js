@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
@@ -17,10 +17,12 @@ const API_BASE_URL = 'http://localhost:5001';
 const TARGET_DISTANCE_M = 5000;
 
 export default function App() {
+  const mapRef = useRef(null);
   const [loading, setLoading] = useState(false);
-  const [region, setRegion] = useState(null);
+  const [initialRegion, setInitialRegion] = useState(null);
   const [routeCoords, setRouteCoords] = useState(null);
   const [startCoord, setStartCoord] = useState(null);
+  const [mapReady, setMapReady] = useState(false);
 
   // Auto-fetch once on launch, purely so this screen has something to show
   // without requiring a tap first (useful for a quick screenshot/demo). The
@@ -28,6 +30,32 @@ export default function App() {
   useEffect(() => {
     generateRoute();
   }, []);
+
+  // Fit the map to the whole loop once it's loaded, rather than a fixed box
+  // around the start point -- a 5km+ loop routinely runs off the edge of a
+  // fixed-delta region since its actual extent depends on the bearing/shape
+  // GraphHopper picked, not just distance from the start.
+  //
+  // Gated on mapReady (react-native-maps' onMapReady), not just routeCoords:
+  // calling fitToCoordinates before the native map view has completed its
+  // first layout is a known no-op on iOS -- the ref exists (React has
+  // mounted and attached it) but the native side isn't ready to compute a
+  // fit yet. Confirmed by testing: gating on routeCoords alone silently did
+  // nothing, framing stayed at the fixed initialRegion delta. The extra
+  // setTimeout is a pragmatic belt-and-suspenders on top of onMapReady --
+  // onMapReady alone has been reported flaky on first launch in some
+  // react-native-maps versions.
+  useEffect(() => {
+    if (mapReady && mapRef.current && routeCoords && routeCoords.length > 0) {
+      const timer = setTimeout(() => {
+        mapRef.current?.fitToCoordinates(routeCoords, {
+          edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
+          animated: true,
+        });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [mapReady, routeCoords]);
 
   async function generateRoute() {
     setLoading(true);
@@ -60,13 +88,15 @@ export default function App() {
       }));
 
       setStartCoord({ latitude, longitude });
-      setRouteCoords(coords);
-      setRegion({
+      setInitialRegion({
         latitude,
         longitude,
         latitudeDelta: 0.03,
         longitudeDelta: 0.03,
       });
+      // Set after initialRegion so the fitToCoordinates effect above only
+      // fires once the MapView (mounted by initialRegion) actually exists.
+      setRouteCoords(coords);
     } catch (err) {
       Alert.alert('Could not generate route', String(err.message || err));
     } finally {
@@ -76,8 +106,8 @@ export default function App() {
 
   return (
     <View style={styles.container}>
-      {region ? (
-        <MapView style={styles.map} initialRegion={region} region={region}>
+      {initialRegion ? (
+        <MapView ref={mapRef} style={styles.map} initialRegion={initialRegion} onMapReady={() => setMapReady(true)}>
           {startCoord && <Marker coordinate={startCoord} title="Start" />}
           {routeCoords && (
             <Polyline coordinates={routeCoords} strokeColor="#2E7D32" strokeWidth={4} />
