@@ -11,6 +11,15 @@ Scope, deliberately narrow:
   bullet) and no returning multiple alternatives to a caller (§5 point 4's
   "return 2-3 alternatives" is a mobile-client-facing concern for later --
   this script only prints the comparison and keeps the single best one).
+- Each bearing's far-point radius is refined, not fixed: starting from
+  target_distance / 2, it's rescaled by (target / actual) after each
+  attempt and re-requested, up to --max-radius-iterations times or until
+  within --distance-tolerance-pct of the target. Straight-line radius vs.
+  actual walked distance isn't linear (street detour varies by direction
+  and local street grid), so this is a simple iterative correction, not a
+  closed-form fix -- it can still land outside tolerance within the
+  iteration cap, particularly on a bearing that hits a real detour-forcing
+  obstacle (river, highway, dead-end trail).
 - The penalty is applied at the OSM-way level (see
   docs/running-app-architecture.md §5 and the investigation earlier in this
   session): the outbound leg is requested with `details=osm_way_id`, and
@@ -52,6 +61,8 @@ import urllib.request
 EARTH_RADIUS_M = 6371000
 DEFAULT_GRAPHHOPPER_URL = "http://localhost:8989"
 DEFAULT_REUSE_PENALTY_MULTIPLIER = 0.01  # how much cheaper an unused way is vs a reused one
+DEFAULT_MAX_RADIUS_ITERATIONS = 4
+DEFAULT_DISTANCE_TOLERANCE_PCT = 5.0  # matches docs/running-app-architecture.md §5 point 3
 
 
 def destination_point(lat, lon, bearing_deg, distance_m):
@@ -158,6 +169,7 @@ def path_to_geojson(candidate, start_lat, start_lon, target_distance_m):
             "time_ms": candidate["total_time"],
             "outbound_way_count": len(candidate["outbound_ways"]),
             "reused_way_count": len(candidate["reused"]),
+            "radius_iterations": candidate["radius_iterations"],
             "score": candidate["score"],
         },
         "geometry": {
@@ -167,29 +179,19 @@ def path_to_geojson(candidate, start_lat, start_lon, target_distance_m):
     }
 
 
-def build_candidate(base_url, lat, lon, bearing, distance, profile, penalty_multiplier):
-    """Fetch one full out-and-back candidate (both legs, penalty applied) for
-    a single bearing. Returns None (with a message printed) instead of
-    raising, so one bad bearing doesn't abort the whole batch -- e.g. a far
-    point that lands somewhere ungraphed."""
-    far_lat, far_lon = destination_point(lat, lon, bearing, distance / 2)
-    try:
-        outbound = fetch_outbound_leg(base_url, lat, lon, far_lat, far_lon, profile)
-        outbound_ways = used_way_ids(outbound)
-        return_leg = fetch_return_leg(
-            base_url, far_lat, far_lon, lat, lon, profile, outbound_ways, penalty_multiplier,
-        )
-    except (urllib.error.URLError, RuntimeError) as e:
-        print(f"  bearing {bearing:>5.0f}°: skipped ({e})", file=sys.stderr)
-        return None
-
+def _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier):
+    """One outbound + penalized-return leg pair at a given far point. Raises
+    on failure -- caller decides how to handle it."""
+    outbound = fetch_outbound_leg(base_url, lat, lon, far_lat, far_lon, profile)
+    outbound_ways = used_way_ids(outbound)
+    return_leg = fetch_return_leg(
+        base_url, far_lat, far_lon, lat, lon, profile, outbound_ways, penalty_multiplier,
+    )
     return_ways = used_way_ids(return_leg)
     reused = set(outbound_ways) & set(return_ways)
     total_distance = outbound["distance"] + return_leg["distance"]
     total_time = outbound["time"] + return_leg["time"]
-
     return {
-        "bearing": bearing,
         "far_point": (far_lat, far_lon),
         "outbound": outbound,
         "return_leg": return_leg,
@@ -200,6 +202,60 @@ def build_candidate(base_url, lat, lon, bearing, distance, profile, penalty_mult
         "total_time": total_time,
         "coords": combine_legs(outbound, return_leg),
     }
+
+
+def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penalty_multiplier,
+                     max_iterations=DEFAULT_MAX_RADIUS_ITERATIONS,
+                     tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT):
+    """Fetch a full out-and-back candidate for a single bearing, refining the
+    far-point radius rather than accepting whatever the fixed
+    target_distance/2 straight-line guess produces.
+
+    Starts at radius = target_distance / 2, then after each attempt rescales
+    by (target / actual) and retries -- e.g. if a radius produced a walked
+    loop 20% longer than target, the next attempt shrinks the radius by
+    ~17% (1 / 1.20). This is a simple proportional correction, not a
+    real optimizer: it assumes the relationship between straight-line radius
+    and walked distance is roughly linear near the current guess, which is
+    good enough in practice for a handful of iterations but isn't
+    guaranteed to converge (a bearing that crosses a river or highway can
+    make small radius changes produce large, non-monotonic distance jumps
+    as the route is forced around the obstacle differently).
+
+    Keeps the closest-to-target attempt seen across all iterations, not
+    just the last one, in case a later rescale overshoots past a better
+    earlier attempt. Returns None (with a message printed) instead of
+    raising, so one bad bearing doesn't abort the whole batch -- e.g. a far
+    point that lands somewhere ungraphed."""
+    radius = target_distance / 2
+    best = None
+    iterations_used = 0
+
+    for iteration in range(1, max_iterations + 1):
+        far_lat, far_lon = destination_point(lat, lon, bearing, radius)
+        try:
+            attempt = _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier)
+        except (urllib.error.URLError, RuntimeError) as e:
+            print(f"  bearing {bearing:>5.0f}° iteration {iteration}: skipped ({e})", file=sys.stderr)
+            break
+
+        iterations_used = iteration
+        distance_error_pct = 100 * abs(attempt["total_distance"] - target_distance) / target_distance
+        if best is None or distance_error_pct < best["_distance_error_pct"]:
+            attempt["_distance_error_pct"] = distance_error_pct
+            best = attempt
+
+        if distance_error_pct <= tolerance_pct or attempt["total_distance"] == 0:
+            break
+        radius *= target_distance / attempt["total_distance"]
+
+    if best is None:
+        return None
+
+    best["bearing"] = bearing
+    best["radius_iterations"] = iterations_used
+    del best["_distance_error_pct"]
+    return best
 
 
 def score_candidate(candidate, target_distance):
@@ -237,6 +293,10 @@ def main():
     parser.add_argument("--profile", default="foot", help="GraphHopper profile name (default: foot)")
     parser.add_argument("--penalty-multiplier", type=float, default=DEFAULT_REUSE_PENALTY_MULTIPLIER,
                          help=f"Priority multiplier applied to ways reused from the outbound leg (default: {DEFAULT_REUSE_PENALTY_MULTIPLIER})")
+    parser.add_argument("--max-radius-iterations", type=int, default=DEFAULT_MAX_RADIUS_ITERATIONS,
+                         help=f"Max far-point radius corrections per bearing (default: {DEFAULT_MAX_RADIUS_ITERATIONS})")
+    parser.add_argument("--distance-tolerance-pct", type=float, default=DEFAULT_DISTANCE_TOLERANCE_PCT,
+                         help=f"Stop refining a bearing's radius once within this %% of target distance (default: {DEFAULT_DISTANCE_TOLERANCE_PCT})")
     parser.add_argument("--graphhopper-url", default=DEFAULT_GRAPHHOPPER_URL, help=f"GraphHopper server base URL (default: {DEFAULT_GRAPHHOPPER_URL})")
     parser.add_argument("--output", help="Write the best candidate as a GeoJSON Feature to this file")
     args = parser.parse_args()
@@ -250,7 +310,8 @@ def main():
 
     candidates = []
     for bearing in bearings:
-        c = build_candidate(args.graphhopper_url, args.lat, args.lon, bearing, args.distance, args.profile, args.penalty_multiplier)
+        c = build_candidate(args.graphhopper_url, args.lat, args.lon, bearing, args.distance, args.profile,
+                             args.penalty_multiplier, args.max_radius_iterations, args.distance_tolerance_pct)
         if c is not None:
             score, distance_error_pct, reuse_pct = score_candidate(c, args.distance)
             c["score"], c["distance_error_pct"], c["reuse_pct"] = score, distance_error_pct, reuse_pct
@@ -263,10 +324,10 @@ def main():
     candidates.sort(key=lambda c: c["score"])
     best = candidates[0]
 
-    print(f"{'bearing':>8}  {'distance_m':>10}  {'dist_err%':>9}  {'ways_out':>8}  {'reused':>6}  {'reuse%':>7}  {'score':>7}")
+    print(f"{'bearing':>8}  {'iters':>5}  {'distance_m':>10}  {'dist_err%':>9}  {'ways_out':>8}  {'reused':>6}  {'reuse%':>7}  {'score':>7}")
     for c in candidates:
         marker = " <- best" if c is best else ""
-        print(f"{c['bearing']:>7.0f}°  {c['total_distance']:>10.1f}  {c['distance_error_pct']:>8.1f}%  "
+        print(f"{c['bearing']:>7.0f}°  {c['radius_iterations']:>5}  {c['total_distance']:>10.1f}  {c['distance_error_pct']:>8.1f}%  "
               f"{len(c['outbound_ways']):>8}  {len(c['reused']):>6}  {c['reuse_pct']:>6.1f}%  {c['score']:>7.1f}{marker}")
 
     print()
