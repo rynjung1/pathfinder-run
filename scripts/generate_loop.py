@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-Pathfinder Run -- v1 loop generation, §5 point 2: a single out-and-back
-candidate with the edge-reuse penalty applied to the return leg.
+Pathfinder Run -- v1 loop generation, §5 points 2-4: several out-and-back
+candidates (one per bearing), each with the edge-reuse penalty applied to
+its return leg, scored on distance accuracy + edge-reuse and the best one
+kept.
 
 Scope, deliberately narrow:
-- One bearing in, one route out -- no candidate generation across multiple
-  headings, no scoring/selection between alternatives (§5 points 3-4).
+- Candidates vary only by outbound bearing, spread evenly starting from
+  --bearing. No park-proximity/"greenness" scoring (§5 point 1's second
+  bullet) and no returning multiple alternatives to a caller (§5 point 4's
+  "return 2-3 alternatives" is a mobile-client-facing concern for later --
+  this script only prints the comparison and keeps the single best one).
 - The penalty is applied at the OSM-way level (see
   docs/running-app-architecture.md §5 and the investigation earlier in this
   session): the outbound leg is requested with `details=osm_way_id`, and
@@ -34,7 +39,7 @@ expensive for the return leg. Not addressed by this script.
 Usage:
     python3 scripts/generate_loop.py --lat 43.4643 --lon -80.5204 --distance 5000
     python3 scripts/generate_loop.py --lat 43.4643 --lon -80.5204 --distance 5000 \
-        --bearing 45 --output loop.geojson
+        --candidates 8 --bearing 0 --output loop.geojson
 """
 import argparse
 import json
@@ -142,23 +147,84 @@ def combine_legs(outbound, return_leg):
     return out_coords + back_coords[1:]
 
 
-def path_to_geojson(coords, start_lat, start_lon, target_distance_m, total_distance_m,
-                     total_time_ms, overlap_way_count, outbound_way_count):
+def path_to_geojson(candidate, start_lat, start_lon, target_distance_m):
     return {
         "type": "Feature",
         "properties": {
             "start": [start_lon, start_lat],
+            "bearing_deg": candidate["bearing"],
             "target_distance_m": target_distance_m,
-            "actual_distance_m": total_distance_m,
-            "time_ms": total_time_ms,
-            "outbound_way_count": outbound_way_count,
-            "reused_way_count": overlap_way_count,
+            "actual_distance_m": candidate["total_distance"],
+            "time_ms": candidate["total_time"],
+            "outbound_way_count": len(candidate["outbound_ways"]),
+            "reused_way_count": len(candidate["reused"]),
+            "score": candidate["score"],
         },
         "geometry": {
             "type": "LineString",
-            "coordinates": coords,
+            "coordinates": candidate["coords"],
         },
     }
+
+
+def build_candidate(base_url, lat, lon, bearing, distance, profile, penalty_multiplier):
+    """Fetch one full out-and-back candidate (both legs, penalty applied) for
+    a single bearing. Returns None (with a message printed) instead of
+    raising, so one bad bearing doesn't abort the whole batch -- e.g. a far
+    point that lands somewhere ungraphed."""
+    far_lat, far_lon = destination_point(lat, lon, bearing, distance / 2)
+    try:
+        outbound = fetch_outbound_leg(base_url, lat, lon, far_lat, far_lon, profile)
+        outbound_ways = used_way_ids(outbound)
+        return_leg = fetch_return_leg(
+            base_url, far_lat, far_lon, lat, lon, profile, outbound_ways, penalty_multiplier,
+        )
+    except (urllib.error.URLError, RuntimeError) as e:
+        print(f"  bearing {bearing:>5.0f}°: skipped ({e})", file=sys.stderr)
+        return None
+
+    return_ways = used_way_ids(return_leg)
+    reused = set(outbound_ways) & set(return_ways)
+    total_distance = outbound["distance"] + return_leg["distance"]
+    total_time = outbound["time"] + return_leg["time"]
+
+    return {
+        "bearing": bearing,
+        "far_point": (far_lat, far_lon),
+        "outbound": outbound,
+        "return_leg": return_leg,
+        "outbound_ways": outbound_ways,
+        "return_ways": return_ways,
+        "reused": reused,
+        "total_distance": total_distance,
+        "total_time": total_time,
+        "coords": combine_legs(outbound, return_leg),
+    }
+
+
+def score_candidate(candidate, target_distance):
+    """Lower is better. Two terms, both expressed as percentages so they're
+    comparable and the printed breakdown is self-explanatory:
+    - distance error: |actual - target| / target * 100
+    - edge-reuse: reused ways / outbound ways * 100
+
+    This is an unweighted sum (distance_error_pct + reuse_pct), not a tuned
+    formula -- it's a placeholder good enough to rank a handful of
+    candidates against each other, not a claim that a 1-point distance-error
+    move should always trade evenly against a 1-point reuse move. Revisit
+    the weighting once real test runs (actually walking generated routes,
+    per docs/running-app-architecture.md §0/§7) show whether reuse should
+    count for more or less than distance accuracy.
+
+    Missing entirely: path-type/"greenness" scoring, §5 point 3's third
+    criterion (sidewalk/park-path percentage, proximity to green space).
+    Not implemented here -- it depends on the custom_areas park-polygon
+    extraction work (§5 point 1's second bullet), which hasn't been done
+    yet. Once that lands, this becomes a three-term score, not two.
+    """
+    distance_error_pct = 100 * abs(candidate["total_distance"] - target_distance) / target_distance
+    reuse_pct = 100 * len(candidate["reused"]) / len(candidate["outbound_ways"]) if candidate["outbound_ways"] else 0
+    return distance_error_pct + reuse_pct, distance_error_pct, reuse_pct
 
 
 def main():
@@ -166,52 +232,50 @@ def main():
     parser.add_argument("--lat", type=float, required=True, help="Start latitude")
     parser.add_argument("--lon", type=float, required=True, help="Start longitude")
     parser.add_argument("--distance", type=float, required=True, help="Target loop distance in meters")
-    parser.add_argument("--bearing", type=float, default=45.0, help="Outbound bearing in degrees (0=N, 90=E); default 45")
+    parser.add_argument("--bearing", type=float, default=0.0, help="Starting outbound bearing in degrees (0=N, 90=E); default 0")
+    parser.add_argument("--candidates", type=int, default=6, help="Number of candidate bearings to try, evenly spread from --bearing (default: 6)")
     parser.add_argument("--profile", default="foot", help="GraphHopper profile name (default: foot)")
     parser.add_argument("--penalty-multiplier", type=float, default=DEFAULT_REUSE_PENALTY_MULTIPLIER,
                          help=f"Priority multiplier applied to ways reused from the outbound leg (default: {DEFAULT_REUSE_PENALTY_MULTIPLIER})")
     parser.add_argument("--graphhopper-url", default=DEFAULT_GRAPHHOPPER_URL, help=f"GraphHopper server base URL (default: {DEFAULT_GRAPHHOPPER_URL})")
-    parser.add_argument("--output", help="Write the loop as a GeoJSON Feature to this file")
+    parser.add_argument("--output", help="Write the best candidate as a GeoJSON Feature to this file")
     args = parser.parse_args()
 
-    far_lat, far_lon = destination_point(args.lat, args.lon, args.bearing, args.distance / 2)
+    bearings = [args.bearing + i * (360 / args.candidates) for i in range(args.candidates)]
 
-    try:
-        outbound = fetch_outbound_leg(args.graphhopper_url, args.lat, args.lon, far_lat, far_lon, args.profile)
-        outbound_ways = used_way_ids(outbound)
-        return_leg = fetch_return_leg(
-            args.graphhopper_url, far_lat, far_lon, args.lat, args.lon,
-            args.profile, outbound_ways, args.penalty_multiplier,
-        )
-    except urllib.error.URLError as e:
-        print(f"error: could not reach GraphHopper at {args.graphhopper_url}: {e}", file=sys.stderr)
+    print(f"start:            {args.lat}, {args.lon}")
+    print(f"target distance:  {args.distance:.0f} m")
+    print(f"candidates:       {args.candidates} (bearings: {', '.join(f'{b:.0f}°' for b in bearings)})")
+    print()
+
+    candidates = []
+    for bearing in bearings:
+        c = build_candidate(args.graphhopper_url, args.lat, args.lon, bearing, args.distance, args.profile, args.penalty_multiplier)
+        if c is not None:
+            score, distance_error_pct, reuse_pct = score_candidate(c, args.distance)
+            c["score"], c["distance_error_pct"], c["reuse_pct"] = score, distance_error_pct, reuse_pct
+            candidates.append(c)
+
+    if not candidates:
+        print("error: no candidates succeeded", file=sys.stderr)
         sys.exit(1)
-    except RuntimeError as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(1)
 
-    return_ways = used_way_ids(return_leg)
-    reused = set(outbound_ways) & set(return_ways)
+    candidates.sort(key=lambda c: c["score"])
+    best = candidates[0]
 
-    total_distance = outbound["distance"] + return_leg["distance"]
-    total_time = outbound["time"] + return_leg["time"]
-    pct_off = 100 * (total_distance - args.distance) / args.distance
+    print(f"{'bearing':>8}  {'distance_m':>10}  {'dist_err%':>9}  {'ways_out':>8}  {'reused':>6}  {'reuse%':>7}  {'score':>7}")
+    for c in candidates:
+        marker = " <- best" if c is best else ""
+        print(f"{c['bearing']:>7.0f}°  {c['total_distance']:>10.1f}  {c['distance_error_pct']:>8.1f}%  "
+              f"{len(c['outbound_ways']):>8}  {len(c['reused']):>6}  {c['reuse_pct']:>6.1f}%  {c['score']:>7.1f}{marker}")
 
-    print(f"start:              {args.lat}, {args.lon}")
-    print(f"far point:          {far_lat:.6f}, {far_lon:.6f}  (bearing {args.bearing}°)")
-    print(f"target distance:    {args.distance:.0f} m")
-    print(f"actual distance:    {total_distance:.1f} m  ({pct_off:+.1f}%)")
-    print(f"  outbound leg:     {outbound['distance']:.1f} m, {len(outbound_ways)} distinct ways")
-    print(f"  return leg:       {return_leg['distance']:.1f} m, {len(return_ways)} distinct ways")
-    print(f"reused ways:        {len(reused)} / {len(outbound_ways)} outbound ways also used on return")
-    print(f"time:               {total_time / 1000:.0f} s")
+    print()
+    print(f"best candidate: bearing {best['bearing']:.0f}°, {best['total_distance']:.1f} m "
+          f"({100 * (best['total_distance'] - args.distance) / args.distance:+.1f}%), "
+          f"{len(best['reused'])}/{len(best['outbound_ways'])} ways reused")
 
     if args.output:
-        coords = combine_legs(outbound, return_leg)
-        feature = path_to_geojson(
-            coords, args.lat, args.lon, args.distance, total_distance, total_time,
-            len(reused), len(outbound_ways),
-        )
+        feature = path_to_geojson(best, args.lat, args.lon, args.distance)
         with open(args.output, "w") as f:
             json.dump(feature, f, indent=2)
         print(f"wrote GeoJSON to {args.output}")
