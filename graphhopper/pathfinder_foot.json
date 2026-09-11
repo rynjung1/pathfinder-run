@@ -1,0 +1,36 @@
+// Pathfinder Run custom pedestrian model.
+//
+// Implements ONLY the static path-type weighting from docs/running-app-architecture.md
+// §5, point 1's first bullet: prefer dedicated pedestrian infrastructure, penalize
+// (not exclude) unprotected major roads, exclude anything without foot access.
+//
+// Deliberately NOT included here (separate, later work):
+// - "Greenness" / park-proximity scoring (needs OSM park-polygon extraction into
+//   custom_areas GeoJSON)
+// - Edge-reuse penalty (app-level logic in the route generator, not a GraphHopper
+//   profile concern)
+//
+// Note: this replaces the stock model's `multiply_by: foot_priority` rather than
+// layering on top of it. GraphHopper's built-in `foot_priority` (FootPriorityParser)
+// already does its own road-class weighting AND reads the literal `sidewalk=*` tag
+// on a way directly -- a signal not exposed as any encoded value queryable here, so
+// this explicit model can't distinguish "primary road with a mapped sidewalk" from
+// "primary road with none." Keeping both would double-penalize/boost the same
+// categories unpredictably, so this is an explicit tradeoff: visible, tunable rules
+// here, at the cost of that sidewalk-tag signal until it's reintroduced deliberately.
+//
+// TRUNK/MOTORWAY get their own (lower) tier rather than sharing PRIMARY/SECONDARY's:
+// the stock model penalizes fast/limited-access roads far harder than ordinary
+// arterials (REACH_DESTINATION = 0.1x vs BAD = 0.5x for primary/secondary), and this
+// keeps that same margin rather than flattening it.
+{
+  "priority": [
+    { "if": "!foot_access", "multiply_by": "0" },
+    { "if": "road_class == PATH || road_class == FOOTWAY || road_class == PEDESTRIAN || road_class == LIVING_STREET", "multiply_by": "1.5" },
+    { "else_if": "road_class == PRIMARY || road_class == SECONDARY", "multiply_by": "0.3" },
+    { "else_if": "road_class == TRUNK || road_class == MOTORWAY", "multiply_by": "0.1" }
+  ],
+  "speed": [
+    { "if": "true", "limit_to": "foot_average_speed" }
+  ]
+}
