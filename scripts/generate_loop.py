@@ -2,8 +2,8 @@
 """
 Pathfinder Run -- v1 loop generation, §5 points 2-4: several out-and-back
 candidates (one per bearing), each with the edge-reuse penalty applied to
-its return leg, scored on distance accuracy + edge-reuse and the best one
-kept.
+its return leg, scored on distance accuracy + edge-reuse + shape and the
+best one kept.
 
 Scope, deliberately narrow:
 - Candidates vary only by outbound bearing, spread evenly starting from
@@ -23,7 +23,21 @@ Scope, deliberately narrow:
   and local street grid), so this is a simple iterative correction, not a
   closed-form fix -- it can still land outside tolerance within the
   iteration cap, particularly on a bearing that hits a real detour-forcing
-  obstacle (river, highway, dead-end trail).
+  obstacle (river, highway, dead-end trail). The rescale step is clamped
+  to [0.4x, 2.5x] per iteration, and any attempt landing outside
+  [--min-distance-fraction, --max-distance-fraction] of target is rejected
+  as degenerate rather than kept as a bad-but-real candidate -- see
+  build_candidate's docstring; found via testing near the clipped region's
+  boundary (New Hamburg, Elmira), where GraphHopper can snap both ends of
+  a route to the same node (a 200 OK with near-zero distance) or force a
+  huge real detour in a sparse rural network (a 200 OK many times over
+  target), neither of which is a usable "loop."
+- Scoring includes a shape term (compactness -- see compactness_score's
+  docstring) alongside distance accuracy and edge-reuse, specifically
+  because the first two alone let a real sawtooth zigzag numerically
+  outscore a genuinely clean loop (confirmed on the Uptown Waterloo 3km
+  case in the validation session -- see score_candidate's docstring for
+  the weight and reasoning).
 - The penalty is applied at the OSM-way level (see
   docs/running-app-architecture.md §5 and the investigation earlier in this
   session): the outbound leg is requested with `details=osm_way_id`, and
@@ -67,6 +81,19 @@ DEFAULT_GRAPHHOPPER_URL = "http://localhost:8989"
 DEFAULT_REUSE_PENALTY_MULTIPLIER = 0.01  # how much cheaper an unused way is vs a reused one
 DEFAULT_MAX_RADIUS_ITERATIONS = 4
 DEFAULT_DISTANCE_TOLERANCE_PCT = 5.0  # matches docs/running-app-architecture.md §5 point 3
+DEFAULT_MIN_DISTANCE_FRACTION = 0.30  # below this fraction of target, treat as a broken/degenerate
+                                       # route (e.g. GraphHopper snapped both ends to the same node
+                                       # near a graph boundary, or a single-way straight there-and-back
+                                       # with no real loop shape at all), not just a bad-but-real
+                                       # candidate. 0.25 was tried first and was too lenient -- a real
+                                       # observed case (New Hamburg, single-way 829m for a 3000m
+                                       # target = 27.6%) slipped through it; 0.30 catches it.
+DEFAULT_MAX_DISTANCE_FRACTION = 2.0    # above this multiple of target, also treat as degenerate --
+                                       # symmetric to DEFAULT_MIN_DISTANCE_FRACTION. Confirmed real:
+                                       # a sparse rural network (New Hamburg @ 8km) let the radius
+                                       # rescale diverge to candidates at 23281m/36397m for an 8000m
+                                       # target instead of converging.
+DEFAULT_COMPACTNESS_WEIGHT = 20  # ad hoc weight, revisit later -- see score_candidate's docstring
 
 
 def destination_point(lat, lon, bearing_deg, distance_m):
@@ -162,6 +189,48 @@ def combine_legs(outbound, return_leg):
     return out_coords + back_coords[1:]
 
 
+def polygon_area_m2(coords):
+    """Shoelace formula in a local equirectangular projection (fine at the
+    scale of a single loop). A self-overlapping ring -- e.g. a return leg
+    that retraces the outbound leg almost exactly -- partially cancels its
+    own area here, which is a feature for compactness_score below: a
+    there-and-back that barely diverges should read as enclosing ~zero
+    area, not need separate overlap-detection logic."""
+    lat0 = coords[0][1]
+    m_per_deg_lat = EARTH_RADIUS_M * math.pi / 180
+    m_per_deg_lon = m_per_deg_lat * math.cos(math.radians(lat0))
+    pts = [(lon * m_per_deg_lon, lat * m_per_deg_lat) for lon, lat in coords]
+    area = 0
+    for i in range(len(pts) - 1):
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
+        area += x1 * y2 - x2 * y1
+    return abs(area) / 2
+
+
+def compactness_score(coords, perimeter_m):
+    """Polsby-Popper compactness: 4*pi*Area / Perimeter^2. Standard measure
+    of "how circle-like is this shape" (1.0 = perfect circle, ->0 = a
+    degenerate sliver or line) borrowed from geography/redistricting.
+
+    Why this, not turning angle: cumulative turning was the first thing
+    tried and it does NOT distinguish a real winding path from a zigzag --
+    tested on the Uptown Waterloo case below, the visually-cleanest loop
+    (bearing 300) had the HIGHEST total turning of all six candidates
+    (5198 degrees), just from following a legitimately winding street.
+    Compactness does distinguish them: a zigzag or a near-total-overlap
+    there-and-back encloses almost no area relative to its length,
+    regardless of how much it turns; a real loop encloses meaningful
+    territory. Confirmed on that same case: compactness ranked all six
+    candidates in the same order as visual judgment (0.294, 0.200, 0.157
+    for the three good-looking loops; 0.012, 0.006, 0.003 for the
+    near-overlap, thin-sliver, and zigzag shapes respectively)."""
+    if perimeter_m <= 0:
+        return 0
+    area = polygon_area_m2(coords)
+    return 4 * math.pi * area / (perimeter_m ** 2)
+
+
 def candidate_to_feature(candidate, start_lat, start_lon, target_distance_m, rank):
     return {
         "type": "Feature",
@@ -175,6 +244,7 @@ def candidate_to_feature(candidate, start_lat, start_lon, target_distance_m, ran
             "outbound_way_count": len(candidate["outbound_ways"]),
             "reused_way_count": len(candidate["reused"]),
             "radius_iterations": candidate["radius_iterations"],
+            "compactness": candidate["compactness"],
             "score": candidate["score"],
         },
         "geometry": {
@@ -223,7 +293,9 @@ def _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multi
 
 def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penalty_multiplier,
                      max_iterations=DEFAULT_MAX_RADIUS_ITERATIONS,
-                     tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT):
+                     tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT,
+                     min_distance_fraction=DEFAULT_MIN_DISTANCE_FRACTION,
+                     max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION):
     """Fetch a full out-and-back candidate for a single bearing, refining the
     far-point radius rather than accepting whatever the fixed
     target_distance/2 straight-line guess produces.
@@ -243,10 +315,38 @@ def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penal
     just the last one, in case a later rescale overshoots past a better
     earlier attempt. Returns None (with a message printed) instead of
     raising, so one bad bearing doesn't abort the whole batch -- e.g. a far
-    point that lands somewhere ungraphed."""
+    point that lands somewhere ungraphed.
+
+    A degenerate result -- total_distance below min_distance_fraction of
+    target, OR above max_distance_fraction of target -- is treated as a
+    FAILED attempt, not a real-but-bad candidate. The low side is confirmed
+    by testing near the clipped region's boundary (New Hamburg, Elmira):
+    GraphHopper can snap the start and far point to the same graph node
+    when the far point falls near/past the graph's edge, returning a 200 OK
+    with a near-zero-length path. The high side is confirmed by the same
+    boundary testing in a sparse rural network (New Hamburg @ 8km): a
+    radius that happens to force a huge real detour can produce a 23000m+
+    result for an 8000m target, and -- without this ceiling -- that result
+    was locked in as `best` on iteration 1 before a later iteration's
+    rescale collapsed to a degenerate route the floor then correctly
+    rejected, leaving the over-target result as the only one recorded.
+    Neither is retried with a rescaled radius: for the low side, the normal
+    rescale formula assumes the real route came in short due to street
+    detours, which doesn't apply to a collapsed single-node route; for the
+    high side, traced empirically (see the validation session's notes) --
+    the rescale ratio computed off a near-zero or wildly-over distance can
+    itself be pathological (a traced case computed a 367x multiplier),
+    so retrying risks compounding the problem rather than correcting it.
+    Either way, retrying is unlikely to recover a fundamentally bad
+    bearing. The rescale step for a normal (non-degenerate) attempt is
+    itself clamped to [0.4x, 2.5x] per iteration for the same reason --
+    bounding the correction at its source, not just filtering the result
+    after the fact."""
     radius = target_distance / 2
     best = None
     iterations_used = 0
+    min_distance = min_distance_fraction * target_distance
+    max_distance = max_distance_fraction * target_distance
 
     for iteration in range(1, max_iterations + 1):
         far_lat, far_lon = destination_point(lat, lon, bearing, radius)
@@ -257,14 +357,24 @@ def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penal
             break
 
         iterations_used = iteration
+        if attempt["total_distance"] < min_distance:
+            print(f"  bearing {bearing:>5.0f}° iteration {iteration}: rejected -- degenerate route "
+                  f"({attempt['total_distance']:.1f}m, target {target_distance:.0f}m)", file=sys.stderr)
+            break
+        if attempt["total_distance"] > max_distance:
+            print(f"  bearing {bearing:>5.0f}° iteration {iteration}: rejected -- wildly over target "
+                  f"({attempt['total_distance']:.1f}m, target {target_distance:.0f}m)", file=sys.stderr)
+            break
+
         distance_error_pct = 100 * abs(attempt["total_distance"] - target_distance) / target_distance
         if best is None or distance_error_pct < best["_distance_error_pct"]:
             attempt["_distance_error_pct"] = distance_error_pct
             best = attempt
 
-        if distance_error_pct <= tolerance_pct or attempt["total_distance"] == 0:
+        if distance_error_pct <= tolerance_pct:
             break
-        radius *= target_distance / attempt["total_distance"]
+        ratio = max(0.4, min(target_distance / attempt["total_distance"], 2.5))
+        radius *= ratio
 
     if best is None:
         return None
@@ -275,39 +385,56 @@ def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penal
     return best
 
 
-def score_candidate(candidate, target_distance):
-    """Lower is better. Two terms, both expressed as percentages so they're
-    comparable and the printed breakdown is self-explanatory:
+def score_candidate(candidate, target_distance, compactness_weight=DEFAULT_COMPACTNESS_WEIGHT):
+    """Lower is better. Three terms:
     - distance error: |actual - target| / target * 100
     - edge-reuse: reused ways / outbound ways * 100
+    - shape penalty: (1 - compactness) * compactness_weight -- see
+      compactness_score's docstring for why compactness (not turning angle)
+      is the signal used here.
 
-    This is an unweighted sum (distance_error_pct + reuse_pct), not a tuned
-    formula -- it's a placeholder good enough to rank a handful of
-    candidates against each other, not a claim that a 1-point distance-error
-    move should always trade evenly against a 1-point reuse move. Revisit
-    the weighting once real test runs (actually walking generated routes,
-    per docs/running-app-architecture.md §0/§7) show whether reuse should
-    count for more or less than distance accuracy.
+    The first two are an unweighted sum (ad hoc, not a tuned formula --
+    a placeholder good enough to rank a handful of candidates against each
+    other, not a claim that a 1-point distance-error move should always
+    trade evenly against a 1-point reuse move). compactness_weight=20 is
+    ALSO an ad hoc weight, revisit later: found empirically on the Uptown
+    Waterloo 3km case (§5 validation session) as the point where a real
+    zigzag (bearing 180, old score 8.35 -- the winner) drops below a clean
+    wide loop (bearing 240, old score 11.4) that was already better on
+    distance accuracy alone. Below weight~10 the zigzag still wins; at 20
+    there's a clean gap between the three good-looking shapes and the
+    three bad ones in that test. Cross-checked against Galt/Cambridge 8km,
+    where the pre-existing winner (already visually verified clean) stays
+    the winner -- this term demotes shapes that were quietly bad, it
+    doesn't disturb an already-good result. Revisit the weighting once
+    real test runs (actually walking generated routes, per
+    docs/running-app-architecture.md §0/§7) show it needs adjusting.
 
     Missing entirely: path-type/"greenness" scoring, §5 point 3's third
     criterion (sidewalk/park-path percentage, proximity to green space).
     Not implemented here -- it depends on the custom_areas park-polygon
     extraction work (§5 point 1's second bullet), which hasn't been done
-    yet. Once that lands, this becomes a three-term score, not two.
+    yet. Once that lands, this becomes a four-term score, not three.
     """
     distance_error_pct = 100 * abs(candidate["total_distance"] - target_distance) / target_distance
     reuse_pct = 100 * len(candidate["reused"]) / len(candidate["outbound_ways"]) if candidate["outbound_ways"] else 0
-    return distance_error_pct + reuse_pct, distance_error_pct, reuse_pct
+    compactness = compactness_score(candidate["coords"], candidate["total_distance"])
+    shape_penalty = (1 - compactness) * compactness_weight
+    score = distance_error_pct + reuse_pct + shape_penalty
+    return score, distance_error_pct, reuse_pct, compactness
 
 
 def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_candidates=6,
                          profile="foot", penalty_multiplier=DEFAULT_REUSE_PENALTY_MULTIPLIER,
                          max_radius_iterations=DEFAULT_MAX_RADIUS_ITERATIONS,
-                         distance_tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT):
+                         distance_tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT,
+                         min_distance_fraction=DEFAULT_MIN_DISTANCE_FRACTION,
+                         max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION):
     """Build and score every candidate for the given start point/target
     distance, one per bearing evenly spread from `bearing`. Returns
     (candidates_sorted_best_first, bearings_tried) -- candidates may be
-    fewer than bearings_tried if some failed (see build_candidate).
+    fewer than bearings_tried if some failed or were rejected as degenerate
+    (see build_candidate).
 
     This is the reusable core the CLI (main, below) and the HTTP wrapper
     (route_api.py) both call -- no argparse or printing in here."""
@@ -315,10 +442,11 @@ def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_ca
     candidates = []
     for b in bearings:
         c = build_candidate(base_url, lat, lon, b, target_distance, profile,
-                             penalty_multiplier, max_radius_iterations, distance_tolerance_pct)
+                             penalty_multiplier, max_radius_iterations, distance_tolerance_pct,
+                             min_distance_fraction, max_distance_fraction)
         if c is not None:
-            score, distance_error_pct, reuse_pct = score_candidate(c, target_distance)
-            c["score"], c["distance_error_pct"], c["reuse_pct"] = score, distance_error_pct, reuse_pct
+            score, distance_error_pct, reuse_pct, compactness = score_candidate(c, target_distance)
+            c["score"], c["distance_error_pct"], c["reuse_pct"], c["compactness"] = score, distance_error_pct, reuse_pct, compactness
             candidates.append(c)
     candidates.sort(key=lambda c: c["score"])
     return candidates, bearings
@@ -338,6 +466,10 @@ def main():
                          help=f"Max far-point radius corrections per bearing (default: {DEFAULT_MAX_RADIUS_ITERATIONS})")
     parser.add_argument("--distance-tolerance-pct", type=float, default=DEFAULT_DISTANCE_TOLERANCE_PCT,
                          help=f"Stop refining a bearing's radius once within this %% of target distance (default: {DEFAULT_DISTANCE_TOLERANCE_PCT})")
+    parser.add_argument("--min-distance-fraction", type=float, default=DEFAULT_MIN_DISTANCE_FRACTION,
+                         help=f"Reject a candidate whose distance falls below this fraction of target as degenerate (default: {DEFAULT_MIN_DISTANCE_FRACTION})")
+    parser.add_argument("--max-distance-fraction", type=float, default=DEFAULT_MAX_DISTANCE_FRACTION,
+                         help=f"Reject a candidate whose distance exceeds this multiple of target as degenerate (default: {DEFAULT_MAX_DISTANCE_FRACTION})")
     parser.add_argument("--graphhopper-url", default=DEFAULT_GRAPHHOPPER_URL, help=f"GraphHopper server base URL (default: {DEFAULT_GRAPHHOPPER_URL})")
     parser.add_argument("--top-n", type=int, default=3, help="Number of top-scoring candidates to keep/return, per §5 point 4's '2-3 alternatives' (default: 3)")
     parser.add_argument("--output", help="Write the top candidates as a GeoJSON FeatureCollection to this file")
@@ -349,6 +481,7 @@ def main():
     candidates, bearings = generate_candidates(
         args.graphhopper_url, args.lat, args.lon, args.distance, args.bearing, args.candidates,
         args.profile, args.penalty_multiplier, args.max_radius_iterations, args.distance_tolerance_pct,
+        args.min_distance_fraction, args.max_distance_fraction,
     )
     print(f"candidates:       {args.candidates} (bearings: {', '.join(f'{b:.0f}°' for b in bearings)})")
     print()
@@ -360,12 +493,12 @@ def main():
     top = candidates[:args.top_n]
     top_set = {id(c) for c in top}
 
-    print(f"{'bearing':>8}  {'iters':>5}  {'distance_m':>10}  {'dist_err%':>9}  {'ways_out':>8}  {'reused':>6}  {'reuse%':>7}  {'score':>7}")
+    print(f"{'bearing':>8}  {'iters':>5}  {'distance_m':>10}  {'dist_err%':>9}  {'ways_out':>8}  {'reused':>6}  {'reuse%':>7}  {'compact':>7}  {'score':>7}")
     for c in candidates:
         rank = top.index(c) + 1 if id(c) in top_set else None
         marker = f" <- #{rank}" if rank else ""
         print(f"{c['bearing']:>7.0f}°  {c['radius_iterations']:>5}  {c['total_distance']:>10.1f}  {c['distance_error_pct']:>8.1f}%  "
-              f"{len(c['outbound_ways']):>8}  {len(c['reused']):>6}  {c['reuse_pct']:>6.1f}%  {c['score']:>7.1f}{marker}")
+              f"{len(c['outbound_ways']):>8}  {len(c['reused']):>6}  {c['reuse_pct']:>6.1f}%  {c['compactness']:>7.3f}  {c['score']:>7.1f}{marker}")
 
     print()
     print(f"top {len(top)} candidate(s):")
