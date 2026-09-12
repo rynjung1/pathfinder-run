@@ -10,7 +10,7 @@ Just enough for the React Native side to request a route and get GeoJSON
 back. Auth/rate-limiting/etc. are real requirements before this is anything
 but a local dev server -- not addressed here.
 
-Endpoint:
+Endpoints:
     POST /route
     body: {"lat": 43.4643, "lon": -80.5204, "distance": 5000}
     optional: "bearing" (default 0), "candidates" (default 6),
@@ -20,11 +20,22 @@ Endpoint:
     -> 400: missing/invalid lat, lon, or distance
     -> 502: GraphHopper unreachable, or no candidate succeeded
 
+    POST /closures -- §6/§7 step 5, reporting only (not wired into routing
+    cost yet -- see closures.py for the storage/snapping design).
+    body: {"lat": 43.4643, "lon": -80.5204}
+    optional: "profile" (default "foot")
+    -> 201: {"id", "osm_way_id", "status"} -- the stored report
+    -> 400: missing/invalid lat/lon, or no routable way near that point
+    -> 502: GraphHopper unreachable
+
 Usage:
     python3 scripts/route_api.py
     curl -X POST http://localhost:5001/route \
         -H "Content-Type: application/json" \
         -d '{"lat": 43.4643, "lon": -80.5204, "distance": 5000}'
+    curl -X POST http://localhost:5001/closures \
+        -H "Content-Type: application/json" \
+        -d '{"lat": 43.4643, "lon": -80.5204}'
 """
 import sys
 
@@ -38,8 +49,10 @@ from generate_loop import (
     candidates_to_geojson,
     generate_candidates,
 )
+from closures import ensure_schema, snap_to_way_id, store_closure
 
 app = Flask(__name__)
+ensure_schema()
 
 
 @app.route("/route", methods=["POST"])
@@ -80,6 +93,32 @@ def route():
 
     top = candidates[:top_n]
     return jsonify(candidates_to_geojson(top, lat, lon, distance))
+
+
+@app.route("/closures", methods=["POST"])
+def report_closure():
+    body = request.get_json(silent=True) or {}
+
+    try:
+        lat = float(body["lat"])
+        lon = float(body["lon"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "lat and lon are required numeric fields"}), 400
+
+    profile = body.get("profile", "foot")
+    if not isinstance(profile, str):
+        return jsonify({"error": "profile must be a string"}), 400
+
+    try:
+        way_id = snap_to_way_id(DEFAULT_GRAPHHOPPER_URL, lat, lon, profile)
+    except Exception as e:  # GraphHopper unreachable -- gateway error, not a 500
+        return jsonify({"error": f"could not reach routing engine: {e}"}), 502
+
+    if way_id is None:
+        return jsonify({"error": "no routable way found near the reported location"}), 400
+
+    closure_id = store_closure(way_id)
+    return jsonify({"id": closure_id, "osm_way_id": way_id, "status": "active"}), 201
 
 
 @app.route("/health", methods=["GET"])

@@ -40,6 +40,11 @@ __pycache__/
 .venv/
 venv/
 
+# Local SQLite databases (runtime data, not source)
+*.db
+*.sqlite
+*.sqlite3
+
 # General
 .DS_Store
 *.log

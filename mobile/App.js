@@ -128,6 +128,7 @@ export default function App() {
   const [liveCoord, setLiveCoord] = useState(null);
   const [deviationDistance, setDeviationDistance] = useState(null);
   const [mapReady, setMapReady] = useState(false);
+  const [reportingClosure, setReportingClosure] = useState(false);
 
   // Auto-fetch once on launch, purely so this screen has something to show
   // without requiring a tap first (useful for a quick screenshot/demo). The
@@ -263,6 +264,38 @@ export default function App() {
     setSessionState('done');
   }
 
+  // §6/§7 step 5: report a closure using whatever position we already have --
+  // live tracking's liveCoord during/just after a run, or a fresh one-shot
+  // fix as a fallback (reusing the same plumbing generateRoute uses, not new
+  // location-access code). Server does the actual snap-to-way-id and
+  // storage (see route_api.py POST /closures, scripts/closures.py) -- this
+  // is deliberately just "capture position, send it," per the reporting-
+  // only scope of this slice (no cost-function wiring yet).
+  async function handleReportClosure() {
+    setReportingClosure(true);
+    try {
+      let coord = liveCoord;
+      if (!coord) {
+        const position = await Location.getCurrentPositionAsync({});
+        coord = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+      }
+      const response = await fetch(`${API_BASE_URL}/closures`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat: coord.latitude, lon: coord.longitude }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        throw new Error(body.error || `route_api returned ${response.status}`);
+      }
+      Alert.alert('Closure reported', `Thanks -- matched to way ${body.osm_way_id}.`);
+    } catch (err) {
+      Alert.alert('Could not report closure', String(err.message || err));
+    } finally {
+      setReportingClosure(false);
+    }
+  }
+
   function handleReset() {
     setRouteCoords(null);
     setStartCoord(null);
@@ -275,6 +308,9 @@ export default function App() {
 
   const isTracking = sessionState === 'running' || sessionState === 'paused';
   const isDeviated = isTracking && deviationDistance !== null && deviationDistance > DEVIATION_THRESHOLD_M;
+  // §6: "during or after a run" -- not idle/generating/ready, there's no
+  // meaningful "here" to report yet.
+  const canReportClosure = sessionState === 'running' || sessionState === 'paused' || sessionState === 'done';
 
   return (
     <View style={styles.container}>
@@ -330,6 +366,15 @@ export default function App() {
         {sessionState === 'done' && (
           <Button title="New Route" onPress={handleReset} />
         )}
+        {canReportClosure && (
+          <View style={styles.reportRow}>
+            {reportingClosure ? (
+              <ActivityIndicator />
+            ) : (
+              <Button title="Report closure" color="#8B4513" onPress={handleReportClosure} />
+            )}
+          </View>
+        )}
       </View>
       <StatusBar style="auto" />
     </View>
@@ -363,6 +408,10 @@ const styles = StyleSheet.create({
   buttonRow: {
     flexDirection: 'row',
     justifyContent: 'space-evenly',
+  },
+  reportRow: {
+    marginTop: 8,
+    alignItems: 'center',
   },
   deviationBanner: {
     position: 'absolute',
