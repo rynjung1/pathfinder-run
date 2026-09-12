@@ -4,14 +4,52 @@ Pathfinder Run -- crowdsourced closure reporting, §6/§7 step 5.
 
 Scope: reporting (store_closure), reading active closures for the routing
 cost function (get_active_closure_way_ids, wired into generate_loop.py),
-and resolving a report (resolve_closure) -- a basic explicit "this is
-clear now" mechanism, not time-based decay/expiry. Decay/expiry is still
-NOT implemented -- the schema just avoids precluding it (see `status` and
-`reported_at` below). Resolve was added as soon as closures started
-actually affecting routing: once a report can make GraphHopper avoid a
-way, having no way to undo one is a real gap, not deferred polish -- a
-closure that's actually been cleared would otherwise keep excluding that
-way from every route indefinitely.
+resolving a report by hand (resolve_closure), and now automatic
+decay/expiry (expire_stale_closures) per §6 point 1's exact wording:
+"a decay/expiry (auto-clear after N days unless re-confirmed) so stale
+reports don't permanently block a segment."
+
+Expiry design, reasoning:
+- No scheduler/cron infrastructure exists anywhere in this project (§0
+  discipline: don't stand up infrastructure before something needs it),
+  so this can't be "a job runs nightly and flips old rows." Instead
+  expire_stale_closures() runs lazily, called at the top of
+  get_active_closure_way_ids() -- the ONE place in the whole system that
+  actually reads "what's currently closed" (both route_api.py's /route
+  and generate_loop.py's CLI go through it). That makes the check
+  self-healing on every read with no separate process to run or forget to
+  run, at the cost of a small per-request table scan over just the
+  currently-active rows (fine at this write volume -- same reasoning
+  already used to justify SQLite over PostGIS above).
+- A third status value, 'expired', distinct from 'resolved' -- keeps the
+  audit trail meaningful (matches the reasoning for using UPDATE, not
+  DELETE, in resolve_closure): "somebody confirmed this is clear" and
+  "nobody re-confirmed it within N days" are different facts about a
+  report and shouldn't collapse into the same value.
+- "Unless re-confirmed" needed no new mechanism: store_closure() already
+  inserts a new, independent row per report rather than upserting one row
+  per way (confirmed by the multiple-reports-per-way design already
+  covered by get_active_closure_way_ids' DISTINCT). So a fresh report on
+  a way that has an old, now-expired report is just another 'active' row
+  with its own reported_at -- the way reads as closed again as soon as
+  ANY of its reports is both active and fresh, with zero extra code.
+- Age is computed in Python (datetime.fromisoformat), not in SQL. Checked
+  empirically first: SQLite's julianday() does parse this exact
+  isoformat()-produced string (with its '+00:00' offset and microseconds)
+  correctly in this environment's sqlite3 build, but that offset-suffix
+  support is a relatively recent SQLite addition (3.42+) and isn't
+  guaranteed on every deployment target, whereas Python's
+  datetime.fromisoformat() is guaranteed to round-trip exactly what
+  datetime.isoformat() produced -- the same string store_closure already
+  writes. Doing the comparison in Python trades a small amount of "let
+  the database do it" for not depending on the runtime's SQLite version.
+- DEFAULT_CLOSURE_MAX_AGE_DAYS = 7 is an ad hoc default, not sourced from
+  the doc (which specifies the *mechanism*, "auto-clear after N days,"
+  but not a value for N) -- same status as this codebase's other tunable
+  constants (DEFAULT_REUSE_PENALTY_MULTIPLIER, DEFAULT_COMPACTNESS_WEIGHT):
+  a reasonable starting point, explicitly open to revision once real
+  closure reports show whether 7 days is too eager or too lax for
+  construction/event-style closures.
 
 Storage: SQLite, not PostGIS, deliberately. Reasoning (see conversation
 notes from the storage investigation before this was built):
@@ -36,12 +74,13 @@ disk.
 """
 import sqlite3
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from generate_loop import destination_point, fetch_outbound_leg
 
 DEFAULT_DB_PATH = str(Path(__file__).parent / "closures.db")
+DEFAULT_CLOSURE_MAX_AGE_DAYS = 7  # ad hoc, revisit -- see module docstring
 
 
 def ensure_schema(db_path=DEFAULT_DB_PATH):
@@ -84,18 +123,54 @@ def store_closure(osm_way_id, db_path=DEFAULT_DB_PATH):
         conn.close()
 
 
+def expire_stale_closures(max_age_days=DEFAULT_CLOSURE_MAX_AGE_DAYS, db_path=DEFAULT_DB_PATH):
+    """§6 point 1's decay/expiry: flip any 'active' report older than
+    max_age_days to 'expired'. See module docstring for why this runs
+    lazily (called from get_active_closure_way_ids, below) instead of a
+    background job, why 'expired' is a separate status from 'resolved',
+    and why the age check is done in Python rather than in SQL.
+
+    Only ever touches rows currently 'active' -- a 'resolved' row already
+    reflects a real outcome (someone confirmed it's clear) and shouldn't
+    be reclassified as merely having aged out.
+
+    Returns the list of ids that were just expired (empty if none) --
+    mainly for tests/logging visibility, not required by any caller."""
+    conn = sqlite3.connect(db_path)
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        rows = conn.execute(
+            "SELECT id, reported_at FROM closures WHERE status = 'active'"
+        ).fetchall()
+        stale_ids = [
+            row_id for row_id, reported_at in rows
+            if datetime.fromisoformat(reported_at) < cutoff
+        ]
+        if stale_ids:
+            placeholders = ",".join("?" * len(stale_ids))
+            conn.execute(
+                f"UPDATE closures SET status = 'expired' WHERE id IN ({placeholders})",
+                stale_ids,
+            )
+            conn.commit()
+        return stale_ids
+    finally:
+        conn.close()
+
+
 def get_active_closure_way_ids(db_path=DEFAULT_DB_PATH):
     """Distinct osm_way_ids currently reported closed, for the routing cost
-    function (§4, §5 point 1's third bullet). Deliberately just `status =
-    'active'` -- no decay/expiry logic exists yet (see module docstring),
-    so an active report stays active until something else marks it
-    otherwise.
+    function (§4, §5 point 1's third bullet). Expires stale reports first
+    (see expire_stale_closures) so 'active' here always means "reported
+    and still within the decay window," not just "never explicitly
+    resolved."
 
     Returns a plain list of ints (empty if none), not a cursor/generator --
     the caller (generate_loop.py) needs to check truthiness and pass this
     into two separate GraphHopper requests (outbound + return leg), so a
     fully-materialized list is simpler than re-querying or holding a
     connection open across both."""
+    expire_stale_closures(db_path=db_path)
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
