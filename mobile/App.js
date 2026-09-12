@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform } from 'react-native';
+import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, FlatList } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import MapView, { Polyline, Marker } from 'react-native-maps';
+import { saveRun, getRuns } from './db';
 
 // Pathfinder Run -- v2 mobile client. §2/§3/§7 step 4: live GPS tracking
 // during an active run, shown moving on the map against the generated
@@ -11,10 +12,23 @@ import MapView, { Polyline, Marker } from 'react-native-maps';
 // round trip needed for this). Run-session state machine per §2:
 //   idle -> generating -> ready -> running -> paused -> done -> (idle)
 //
+// Also here: local run history (§2's "cached routes, run history" local
+// store) -- the full GPS trace is captured during an active run (not just
+// the single latest liveCoord the deviation check needs), and a run
+// record is saved to SQLite (db.js -- see that file for the storage
+// investigation) when a session reaches 'done'. A basic past-runs list
+// screen shows date/distance/duration for each saved run.
+//
 // Deliberately NOT here yet:
 // - Rerouting once a deviation is detected -- detection + a UI indicator
 //   only for now, no recalculation logic.
-// - Server-side batch sync of the run track.
+// - Server-side sync of run history -- local-only for now, a separate
+//   later step once local history proves useful (explicitly scoped this
+//   way, not an oversight).
+// - Route replay-on-map for a past run -- the polyline-rendering code
+//   already exists (see the MapView below) but wiring a past run's trace
+//   back into it, plus the screen/navigation to get there, is more than
+//   this slice's "basic list" scope asked for.
 // - Android foreground service + persistent notification. Confirmed
 //   feasible without ACCESS_BACKGROUND_LOCATION (verified directly from
 //   expo-location's config-plugin source: isAndroidForegroundServiceEnabled
@@ -116,9 +130,63 @@ function distanceToRouteMeters(point, routeCoords) {
   return minDist;
 }
 
+// True great-circle distance (meters) between two lat/lon points -- unlike
+// the local flat-plane projection above (fine for a single deviation check
+// over tens/hundreds of meters), a run's full trace can span kilometers,
+// so this uses the standard haversine formula rather than a local
+// approximation that could drift over that range.
+function haversineMeters(a, b) {
+  const R = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(b.latitude - a.latitude);
+  const dLon = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// Sum of consecutive point-to-point distances along a captured trace --
+// the run's actual covered distance, computed from what was really
+// walked/run, not just re-reported as the target distance.
+function traceDistanceMeters(trace) {
+  let total = 0;
+  for (let i = 0; i < trace.length - 1; i++) {
+    total += haversineMeters(trace[i], trace[i + 1]);
+  }
+  return total;
+}
+
+function formatDuration(ms) {
+  const totalSeconds = Math.round(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+}
+
+function formatDistance(meters) {
+  return `${(meters / 1000).toFixed(2)} km`;
+}
+
 export default function App() {
   const mapRef = useRef(null);
   const watchSubscriptionRef = useRef(null);
+
+  // The full GPS trace for the run in progress -- a plain ref, not React
+  // state: every watchPositionAsync callback appends to it, and doing that
+  // as state would re-render the whole component on every single GPS
+  // ping just to accumulate history nothing on screen needs per-point.
+  // liveCoord (state, below) stays the only per-point value that drives
+  // UI (the live marker + deviation check).
+  const traceRef = useRef([]);
+  // Wall-clock run timing, tracked across pause/resume: `startedAt` is set
+  // once, on the first Start; `activeMs` accumulates only the time spent
+  // actually running (pauses don't count towards duration); `segmentStartedAt`
+  // is when the CURRENT running segment began, added into activeMs on the
+  // next pause/end.
+  const runTimingRef = useRef({ startedAt: null, activeMs: 0, segmentStartedAt: null });
 
   // idle | generating | ready | running | paused | done
   const [sessionState, setSessionState] = useState('idle');
@@ -129,6 +197,12 @@ export default function App() {
   const [deviationDistance, setDeviationDistance] = useState(null);
   const [mapReady, setMapReady] = useState(false);
   const [reportingClosure, setReportingClosure] = useState(false);
+  // Separate from sessionState -- the past-runs list is a standalone
+  // screen you can visit and leave from, not a step in the run-session
+  // state machine.
+  const [showHistory, setShowHistory] = useState(false);
+  const [pastRuns, setPastRuns] = useState([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   // Auto-fetch once on launch, purely so this screen has something to show
   // without requiring a tap first (useful for a quick screenshot/demo). The
@@ -234,6 +308,8 @@ export default function App() {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
       };
+      // Full trace, for run history -- every point, not just the latest.
+      traceRef.current.push({ ...coord, timestamp: position.timestamp });
       setLiveCoord(coord);
       setDeviationDistance(distanceToRouteMeters(coord, routeCoords));
     });
@@ -245,22 +321,54 @@ export default function App() {
   }
 
   async function handleStart() {
+    // Fresh trace/timing for this run -- handleStart only ever fires from
+    // 'ready' (see the state machine), so this is genuinely a new run
+    // starting, not a resume (that's handleResume, below).
+    traceRef.current = [];
+    runTimingRef.current = { startedAt: new Date().toISOString(), activeMs: 0, segmentStartedAt: Date.now() };
     setSessionState('running');
     await startWatching();
   }
 
   function handlePause() {
     stopWatching();
+    const timing = runTimingRef.current;
+    if (timing.segmentStartedAt) {
+      timing.activeMs += Date.now() - timing.segmentStartedAt;
+      timing.segmentStartedAt = null;
+    }
     setSessionState('paused');
   }
 
   async function handleResume() {
+    runTimingRef.current.segmentStartedAt = Date.now();
     setSessionState('running');
     await startWatching();
   }
 
-  function handleEnd() {
+  async function handleEnd() {
     stopWatching();
+    const timing = runTimingRef.current;
+    if (timing.segmentStartedAt) {
+      timing.activeMs += Date.now() - timing.segmentStartedAt;
+      timing.segmentStartedAt = null;
+    }
+    const trace = traceRef.current;
+    try {
+      await saveRun({
+        startedAt: timing.startedAt,
+        targetDistanceM: TARGET_DISTANCE_M,
+        actualDistanceM: traceDistanceMeters(trace),
+        durationMs: timing.activeMs,
+        trace,
+      });
+    } catch (err) {
+      // Local-only storage, no server fallback -- if this fails the run's
+      // data really is gone. Surfaced plainly rather than silently
+      // swallowed, but doesn't block finishing the session (there's
+      // nothing left to retry against here).
+      Alert.alert('Could not save run', String(err.message || err));
+    }
     setSessionState('done');
   }
 
@@ -296,6 +404,23 @@ export default function App() {
     }
   }
 
+  async function openHistory() {
+    setShowHistory(true);
+    setLoadingHistory(true);
+    try {
+      const runs = await getRuns();
+      setPastRuns(runs);
+    } catch (err) {
+      Alert.alert('Could not load past runs', String(err.message || err));
+    } finally {
+      setLoadingHistory(false);
+    }
+  }
+
+  function closeHistory() {
+    setShowHistory(false);
+  }
+
   function handleReset() {
     setRouteCoords(null);
     setStartCoord(null);
@@ -311,6 +436,41 @@ export default function App() {
   // §6: "during or after a run" -- not idle/generating/ready, there's no
   // meaningful "here" to report yet.
   const canReportClosure = sessionState === 'running' || sessionState === 'paused' || sessionState === 'done';
+  // Not while actively tracking/generating -- avoids competing with the
+  // in-run controls, and there's nothing new to show mid-run anyway.
+  const canShowHistory = sessionState === 'idle' || sessionState === 'ready' || sessionState === 'done';
+
+  if (showHistory) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.historyHeader}>
+          <Text style={styles.historyTitle}>Past Runs</Text>
+          <Button title="Back" onPress={closeHistory} />
+        </View>
+        {loadingHistory ? (
+          <ActivityIndicator style={styles.historyLoading} size="large" />
+        ) : pastRuns.length === 0 ? (
+          <View style={styles.placeholder}>
+            <Text style={styles.placeholderText}>No runs saved yet -- finish a run to see it here.</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={pastRuns}
+            keyExtractor={(item) => String(item.id)}
+            renderItem={({ item }) => (
+              <View style={styles.runRow}>
+                <Text style={styles.runDate}>{new Date(item.startedAt).toLocaleString()}</Text>
+                <Text style={styles.runStats}>
+                  {formatDistance(item.actualDistanceM)} (target {formatDistance(item.targetDistanceM)}) · {formatDuration(item.durationMs)}
+                </Text>
+              </View>
+            )}
+          />
+        )}
+        <StatusBar style="auto" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -375,6 +535,11 @@ export default function App() {
             )}
           </View>
         )}
+        {canShowHistory && (
+          <View style={styles.reportRow}>
+            <Button title="Past Runs" onPress={openHistory} />
+          </View>
+        )}
       </View>
       <StatusBar style="auto" />
     </View>
@@ -427,5 +592,35 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '600',
     textAlign: 'center',
+  },
+  historyHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'ios' ? 56 : 16,
+    paddingBottom: 12,
+  },
+  historyTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+  },
+  historyLoading: {
+    marginTop: 24,
+  },
+  runRow: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#ccc',
+  },
+  runDate: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  runStats: {
+    fontSize: 14,
+    color: '#555',
+    marginTop: 4,
   },
 });

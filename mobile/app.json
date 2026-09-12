@@ -34,7 +34,8 @@
         {
           "locationWhenInUsePermission": "Pathfinder Run uses your current location to generate a running route starting from where you are."
         }
-      ]
+      ],
+      "expo-sqlite"
     ]
   }
 }
