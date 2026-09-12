@@ -199,7 +199,13 @@ graphhopper:
   # GraphHopper reads GeoJSON polygon files including their properties from this directory and makes them available
   # to all tag parsers and custom models. All GeoJSON Features require to have the "id" property.
   # Country borders are included automatically (see countries.geojson).
-  # custom_areas.directory: path/to/custom_areas
+  # Greenness/park-proximity boost, §5 point 1's second bullet -- see
+  # pathfinder_foot.json's `in_greenspace` rule. Built by
+  # scripts/build_greenspace.py from this extract's own OSM data (not
+  # committed to data/ directly -- see that script's comments on why a
+  # dedicated subdirectory, not data/ itself, avoids a real collision with
+  # data/boundaries/region-of-waterloo.geojson, which has no "id" property).
+  custom_areas.directory: ../data/greenspace
 
 
   #### Country Rules ####
