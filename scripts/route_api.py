@@ -10,6 +10,14 @@ Just enough for the React Native side to request a route and get GeoJSON
 back. Auth/rate-limiting/etc. are real requirements before this is anything
 but a local dev server -- not addressed here.
 
+Multi-city (§0's "expand to additional cities"): this single Flask app
+fronts multiple GraphHopper instances, one per city (cities.py), and
+resolves which one to query per-request via point-in-polygon on the
+request's own lat/lon against each city's real boundary -- see
+cities.py's module docstring for the investigation this was based on.
+The client never specifies a city; a location outside every known city's
+boundary gets a plain 400, not a guess.
+
 Endpoints:
     POST /route
     body: {"lat": 43.4643, "lon": -80.5204, "distance": 5000}
@@ -51,11 +59,11 @@ from flask import Flask, jsonify, request
 
 from generate_loop import (
     DEFAULT_DISTANCE_TOLERANCE_PCT,
-    DEFAULT_GRAPHHOPPER_URL,
     DEFAULT_MAX_RADIUS_ITERATIONS,
     DEFAULT_REUSE_PENALTY_MULTIPLIER,
     candidates_to_geojson,
     generate_candidates,
+    get_long_way_ids,
 )
 from closures import (
     ensure_schema,
@@ -64,6 +72,7 @@ from closures import (
     snap_to_way_id,
     store_closure,
 )
+from cities import resolve_city
 
 app = Flask(__name__)
 ensure_schema()
@@ -94,17 +103,33 @@ def route():
     if num_candidates < 1 or top_n < 1:
         return jsonify({"error": "candidates and top_n must be at least 1"}), 400
 
+    # Multi-city dispatch (§0's "expand to additional cities") -- see
+    # cities.py's module docstring for the investigation/reasoning. Point-in-
+    # polygon against each city's real boundary, not a client-supplied city
+    # name: the client's contract stays "send lat/lon, get a route," exactly
+    # as before Guelph existed.
+    city = resolve_city(lat, lon)
+    if city is None:
+        return jsonify({"error": "no routing coverage for this location"}), 400
+
     # Active closures apply to every candidate/bearing in this request, so
     # fetch once here rather than inside generate_candidates -- see that
     # function's docstring for why it doesn't query closures.py itself
     # (avoids a circular import; closures.py imports from generate_loop.py).
+    # Not city-filtered (see cities.py's docstring on why that's a known,
+    # deliberately deferred limitation, not a correctness bug).
     closed_way_ids = get_active_closure_way_ids()
+
+    # This city's own long-way audit, not the module default (Waterloo
+    # Region's) -- see generate_candidates' docstring on why this must be
+    # passed explicitly for a non-default city.
+    long_way_ids = get_long_way_ids(city["long_ways_path"])
 
     try:
         candidates, _bearings = generate_candidates(
-            DEFAULT_GRAPHHOPPER_URL, lat, lon, distance, bearing, num_candidates, profile,
+            city["base_url"], lat, lon, distance, bearing, num_candidates, profile,
             DEFAULT_REUSE_PENALTY_MULTIPLIER, DEFAULT_MAX_RADIUS_ITERATIONS, DEFAULT_DISTANCE_TOLERANCE_PCT,
-            closed_way_ids=closed_way_ids,
+            closed_way_ids=closed_way_ids, long_way_ids=long_way_ids,
         )
     except Exception as e:  # GraphHopper unreachable or similar -- surface as a gateway error, not a 500
         return jsonify({"error": f"route generation failed: {e}"}), 502
@@ -130,8 +155,12 @@ def report_closure():
     if not isinstance(profile, str):
         return jsonify({"error": "profile must be a string"}), 400
 
+    city = resolve_city(lat, lon)
+    if city is None:
+        return jsonify({"error": "no routing coverage for this location"}), 400
+
     try:
-        way_id = snap_to_way_id(DEFAULT_GRAPHHOPPER_URL, lat, lon, profile)
+        way_id = snap_to_way_id(city["base_url"], lat, lon, profile)
     except Exception as e:  # GraphHopper unreachable -- gateway error, not a 500
         return jsonify({"error": f"could not reach routing engine: {e}"}), 502
 

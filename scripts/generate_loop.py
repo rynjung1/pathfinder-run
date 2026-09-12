@@ -205,17 +205,15 @@ def used_way_segments(path):
     return segments
 
 
-def _load_long_way_ids(path=LONG_WAYS_PATH):
+def _load_long_way_ids(path):
     """way_id -> length_m for every way the offline audit (audit_long_ways.py)
-    found at or above its length threshold, for the current clipped
-    extract. Loaded once per process (module-level cache) -- this file
-    only changes when someone re-runs the audit after re-clipping the
-    extract, never mid-run.
+    found at or above its length threshold, for a given clipped extract.
 
     Missing file is NOT an error: it just means the audit hasn't been run
     (e.g. a fresh checkout before `python3 scripts/audit_long_ways.py`) --
     every way is then treated as "not long," which is exactly today's
     pre-fix behavior (the safe default), not a crash."""
+    path = Path(path)
     if not path.exists():
         return {}
     with open(path) as f:
@@ -223,14 +221,24 @@ def _load_long_way_ids(path=LONG_WAYS_PATH):
     return {int(k): v for k, v in raw.items()}
 
 
-_LONG_WAY_IDS_CACHE = None
+# Keyed by path (as a string), not a single global -- multi-city (§0), each
+# city has its own audit file (data/long_ways.json for Waterloo Region,
+# data/long_ways_guelph.json for Guelph, etc.). A single unkeyed cache was
+# the original (v1, one-city) shape of this function; keeping it unkeyed
+# after Guelph was added would have silently used Waterloo's audit for
+# every city's requests -- way ids are globally unique, so a genuinely
+# long Guelph way just never appears in Waterloo's list, and the long-way
+# fix would silently never engage for it, re-introducing the exact
+# blanket-penalty bug it exists to fix, just for the second city. Caught
+# during Guelph's full validation pass, not left in.
+_LONG_WAY_IDS_CACHE = {}
 
 
-def get_long_way_ids():
-    global _LONG_WAY_IDS_CACHE
-    if _LONG_WAY_IDS_CACHE is None:
-        _LONG_WAY_IDS_CACHE = _load_long_way_ids()
-    return _LONG_WAY_IDS_CACHE
+def get_long_way_ids(path=LONG_WAYS_PATH):
+    key = str(path)
+    if key not in _LONG_WAY_IDS_CACHE:
+        _LONG_WAY_IDS_CACHE[key] = _load_long_way_ids(path)
+    return _LONG_WAY_IDS_CACHE[key]
 
 
 def build_way_buffer_polygon(coords, width_m=DEFAULT_WAY_BUFFER_WIDTH_M):
@@ -282,7 +290,8 @@ def build_way_buffer_polygon(coords, width_m=DEFAULT_WAY_BUFFER_WIDTH_M):
 
 def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
                       avoid_way_ids, penalty_multiplier,
-                      closed_way_ids=None, closure_multiplier=DEFAULT_CLOSURE_MULTIPLIER):
+                      closed_way_ids=None, closure_multiplier=DEFAULT_CLOSURE_MULTIPLIER,
+                      long_way_ids=None):
     """Route back, penalizing every way used on the outbound leg, AND
     excluding any currently-closed way. Two independent `priority` if-blocks
     in one custom_model, one per concern -- merges with (does not replace)
@@ -311,7 +320,11 @@ def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
     (legacy/direct-call form -- always whole-way OR-chain, unchanged) or a
     dict {way_id: [[lon, lat], ...]} as produced by used_way_segments(),
     which is what _fetch_leg_pair actually passes. For a dict, each way is
-    checked against the offline long-way audit (get_long_way_ids): an
+    checked against the offline long-way audit -- long_way_ids, if given
+    (the resolved dict from get_long_way_ids(path) for whichever city's
+    extract this request is against; multi-city callers like route_api.py
+    must pass this explicitly, not rely on the default), else
+    get_long_way_ids() with its default (Waterloo Region's) path -- an
     ordinary (short) way still goes into the flat OR-chain exactly as
     before -- zero behavior change, confirmed byte-identical against the
     pre-fix Uptown Waterloo validation case. A LONG way instead gets its
@@ -342,7 +355,8 @@ def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
 
     if avoid_way_ids:
         if isinstance(avoid_way_ids, dict):
-            long_way_ids = get_long_way_ids()
+            if long_way_ids is None:
+                long_way_ids = get_long_way_ids()  # default: Waterloo Region's audit -- see get_long_way_ids' docstring
             short_way_ids = []
             for way_id, coords in avoid_way_ids.items():
                 if way_id in long_way_ids and len(coords) >= 2:
@@ -475,7 +489,7 @@ def candidates_to_geojson(candidates, start_lat, start_lon, target_distance_m):
 
 
 def _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier,
-                     closed_way_ids=None):
+                     closed_way_ids=None, long_way_ids=None):
     """One outbound + penalized-return leg pair at a given far point. Raises
     on failure -- caller decides how to handle it."""
     outbound = fetch_outbound_leg(base_url, lat, lon, far_lat, far_lon, profile, closed_way_ids)
@@ -487,7 +501,7 @@ def _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multi
     outbound_ways = sorted(outbound_segments.keys())
     return_leg = fetch_return_leg(
         base_url, far_lat, far_lon, lat, lon, profile, outbound_segments, penalty_multiplier,
-        closed_way_ids,
+        closed_way_ids, long_way_ids=long_way_ids,
     )
     return_ways = used_way_ids(return_leg)
     reused = set(outbound_ways) & set(return_ways)
@@ -511,7 +525,7 @@ def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penal
                      tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT,
                      min_distance_fraction=DEFAULT_MIN_DISTANCE_FRACTION,
                      max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION,
-                     closed_way_ids=None):
+                     closed_way_ids=None, long_way_ids=None):
     """Fetch a full out-and-back candidate for a single bearing, refining the
     far-point radius rather than accepting whatever the fixed
     target_distance/2 straight-line guess produces.
@@ -568,7 +582,7 @@ def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penal
         far_lat, far_lon = destination_point(lat, lon, bearing, radius)
         try:
             attempt = _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier,
-                                       closed_way_ids)
+                                       closed_way_ids, long_way_ids)
         except (urllib.error.URLError, RuntimeError) as e:
             print(f"  bearing {bearing:>5.0f}° iteration {iteration}: skipped ({e})", file=sys.stderr)
             break
@@ -627,11 +641,15 @@ def score_candidate(candidate, target_distance, compactness_weight=DEFAULT_COMPA
     real test runs (actually walking generated routes, per
     docs/running-app-architecture.md §0/§7) show it needs adjusting.
 
-    Missing entirely: path-type/"greenness" scoring, §5 point 3's third
-    criterion (sidewalk/park-path percentage, proximity to green space).
-    Not implemented here -- it depends on the custom_areas park-polygon
-    extraction work (§5 point 1's second bullet), which hasn't been done
-    yet. Once that lands, this becomes a four-term score, not three.
+    Greenness/park-proximity (§5 point 1's second bullet) is NOT a term
+    here -- it's baked into pathfinder_foot.json's routing cost instead
+    (an `in_greenspace` priority multiplier), so it already shapes which
+    candidates get found in the first place, rather than re-ranking
+    candidates after the fact. See that file's comments for the
+    reasoning. §5 point 3's separate "path-type score (sidewalk/park path
+    percentage)" criterion is still not a distinct scoring term here --
+    the same routing-cost-level path-type weighting already does the
+    equivalent job for candidate generation.
     """
     distance_error_pct = 100 * abs(candidate["total_distance"] - target_distance) / target_distance
     reuse_pct = 100 * len(candidate["reused"]) / len(candidate["outbound_ways"]) if candidate["outbound_ways"] else 0
@@ -647,7 +665,7 @@ def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_ca
                          distance_tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT,
                          min_distance_fraction=DEFAULT_MIN_DISTANCE_FRACTION,
                          max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION,
-                         closed_way_ids=None):
+                         closed_way_ids=None, long_way_ids=None):
     """Build and score every candidate for the given start point/target
     distance, one per bearing evenly spread from `bearing`. Returns
     (candidates_sorted_best_first, bearings_tried) -- candidates may be
@@ -662,6 +680,15 @@ def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_ca
     generate_loop.py (destination_point, fetch_outbound_leg), so importing
     closures.py here too would create a cycle.
 
+    long_way_ids: the resolved long-way audit dict (get_long_way_ids(path))
+    for whichever city's extract base_url actually points at -- multi-city
+    (§0) callers MUST pass this explicitly (route_api.py does, resolved
+    from cities.py). Left as None, it silently defaults to Waterloo
+    Region's own audit regardless of which city base_url is for -- exactly
+    the bug caught during Guelph's validation pass (see get_long_way_ids'
+    docstring): a real long Guelph way would never match Waterloo's way
+    ids, so the long-way fix would silently never engage for it.
+
     This is the reusable core the CLI (main, below) and the HTTP wrapper
     (route_api.py) both call -- no argparse or printing in here."""
     bearings = [bearing + i * (360 / num_candidates) for i in range(num_candidates)]
@@ -669,7 +696,7 @@ def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_ca
     for b in bearings:
         c = build_candidate(base_url, lat, lon, b, target_distance, profile,
                              penalty_multiplier, max_radius_iterations, distance_tolerance_pct,
-                             min_distance_fraction, max_distance_fraction, closed_way_ids)
+                             min_distance_fraction, max_distance_fraction, closed_way_ids, long_way_ids)
         if c is not None:
             score, distance_error_pct, reuse_pct, compactness = score_candidate(c, target_distance)
             c["score"], c["distance_error_pct"], c["reuse_pct"], c["compactness"] = score, distance_error_pct, reuse_pct, compactness
