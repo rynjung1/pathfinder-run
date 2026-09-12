@@ -1,0 +1,23 @@
+// SCRATCH profile for the full-Ontario import feasibility check ONLY --
+// not used by either production instance (Waterloo Region, Guelph), and
+// not intended to be. Identical to pathfinder_foot.json's path-type
+// weighting, but deliberately WITHOUT the `in_greenspace` rule: a
+// province-wide greenspace.geojson doesn't exist yet (that's the separate
+// scoped measurement -- see build_greenspace.py's tags-filter-only test),
+// and this feasibility check is specifically about raw import + CH
+// performance at Ontario's scale, not about producing a real deployable
+// profile. Delete this file once the feasibility check is done, unless a
+// real full-Ontario instance actually gets built later (in which case
+// build the real greenspace data first and use pathfinder_foot.json
+// itself, not this stripped-down copy).
+{
+  "priority": [
+    { "if": "!foot_access", "multiply_by": "0" },
+    { "if": "road_class == PATH || road_class == FOOTWAY || road_class == PEDESTRIAN || road_class == LIVING_STREET", "multiply_by": "1.5" },
+    { "else_if": "road_class == PRIMARY || road_class == SECONDARY", "multiply_by": "0.3" },
+    { "else_if": "road_class == TRUNK || road_class == MOTORWAY", "multiply_by": "0.1" }
+  ],
+  "speed": [
+    { "if": "true", "limit_to": "foot_average_speed" }
+  ]
+}
