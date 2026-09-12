@@ -4,24 +4,24 @@ import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import MapView, { Polyline, Marker } from 'react-native-maps';
 
-// Pathfinder Run -- v2 mobile client, first slice of §2/§3/§7 step 4: live
-// GPS tracking during an active run, shown moving on the map against the
-// generated route. Run-session state machine per §2:
+// Pathfinder Run -- v2 mobile client. §2/§3/§7 step 4: live GPS tracking
+// during an active run, shown moving on the map against the generated
+// route, plus on-device deviation detection (comparing the live point to
+// the cached route geometry, §3's data-minimization guidance -- no server
+// round trip needed for this). Run-session state machine per §2:
 //   idle -> generating -> ready -> running -> paused -> done -> (idle)
 //
-// Deliberately NOT in this slice (see the investigation in this session's
-// notes before building any of this):
-// - On-device deviation detection (comparing live point to route geometry)
-//   and server-side batch sync -- next slices, once this is working.
-// - Android foreground service + persistent notification (survives a
-//   locked screen under ACCESS_FINE_LOCATION alone, confirmed feasible and
-//   NOT requiring ACCESS_BACKGROUND_LOCATION -- verified directly from
-//   expo-location's config-plugin source, which adds
-//   FOREGROUND_SERVICE/FOREGROUND_SERVICE_LOCATION independently of
-//   isAndroidBackgroundLocationEnabled). Not wired up here -- it needs an
-//   app.json config plugin change and its own test pass, and this slice's
-//   scope was explicitly "state machine + start-on-run + live dot on map,"
-//   not lock-screen survival. Confirmed feasible; deferred, not forgotten.
+// Deliberately NOT here yet:
+// - Rerouting once a deviation is detected -- detection + a UI indicator
+//   only for now, no recalculation logic.
+// - Server-side batch sync of the run track.
+// - Android foreground service + persistent notification. Confirmed
+//   feasible without ACCESS_BACKGROUND_LOCATION (verified directly from
+//   expo-location's config-plugin source: isAndroidForegroundServiceEnabled
+//   and isAndroidBackgroundLocationEnabled are independent flags), but
+//   deliberately not implemented -- decided not a priority right now, see
+//   the comment on WATCH_OPTIONS/startWatching below for what this means
+//   in practice.
 // - iOS lock-screen survival is a DIFFERENT, harder case: locking the
 //   screen backgrounds the app (applicationDidEnterBackground fires) same
 //   as switching apps, and continuing location updates through that
@@ -34,9 +34,7 @@ import MapView, { Polyline, Marker } from 'react-native-maps';
 //   that flag unconditionally with no prior authorization check, so this
 //   isn't an Expo gap to work around -- it's Apple's platform rule.
 //   Matches the doc's own §0 phasing: Always/background is v3, explicitly
-//   opt-in, not default. This slice tracks correctly while the app is
-//   foregrounded (screen on); locking the screen mid-run stops updates on
-//   iOS specifically until that v3 work happens.
+//   opt-in, not default.
 //
 // Addressing: an iOS Simulator shares the host Mac's network stack, so
 // localhost reaches a server running on the same machine directly. That is
@@ -47,11 +45,76 @@ import MapView, { Polyline, Marker } from 'react-native-maps';
 const API_BASE_URL = 'http://localhost:5001';
 const TARGET_DISTANCE_M = 5000;
 
+// Known limitation, not an oversight: this is plain watchPositionAsync, no
+// foreground service. Tracking stops silently the moment the screen locks
+// or the app is backgrounded -- on Android as much as iOS, even though a
+// foreground service *would* let Android keep tracking through a locked
+// screen under ordinary ACCESS_FINE_LOCATION (no ACCESS_BACKGROUND_LOCATION
+// needed -- see the file header). That's confirmed feasible but explicitly
+// not built yet: skipped for now as a lower priority than deviation
+// detection, not because it's hard. If this needs revisiting, it's
+// isAndroidForegroundServiceEnabled in the expo-location config plugin
+// (app.json), not a rewrite of the tracking logic here.
 const WATCH_OPTIONS = {
   accuracy: Location.Accuracy.BestForNavigation,
   timeInterval: 2000,   // ms between updates (Android only, per expo-location docs)
   distanceInterval: 5,  // meters -- don't bother updating for sub-5m jitter
 };
+
+// How far off the generated route (meters) before flagging a deviation.
+// Ad hoc starting point, not tuned: needs to comfortably clear normal GPS
+// jitter (~5-15m on a good fix) without being so loose that a real
+// wrong-turn goes unnoticed for too long. Revisit once real outdoor running
+// tests exist -- same "ad hoc, revisit later" spirit as the loop-scoring
+// weights in scripts/generate_loop.py.
+const DEVIATION_THRESHOLD_M = 40;
+
+// Local flat-plane projection centered on `origin`, in meters. Accurate
+// enough at the scale this is used for (a deviation check over tens to a
+// few hundred meters) -- not attempting true great-circle math for a
+// difference this small.
+function projectToLocalMeters(origin, point) {
+  const M_PER_DEG_LAT = 111320;
+  const mPerDegLon = M_PER_DEG_LAT * Math.cos((origin.latitude * Math.PI) / 180);
+  return {
+    x: (point.longitude - origin.longitude) * mPerDegLon,
+    y: (point.latitude - origin.latitude) * M_PER_DEG_LAT,
+  };
+}
+
+// Shortest distance from point p to segment a-b, all in the same local xy
+// plane (meters).
+function pointToSegmentDistance(p, a, b) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const abLenSq = abx * abx + aby * aby;
+  let t = abLenSq === 0 ? 0 : ((p.x - a.x) * abx + (p.y - a.y) * aby) / abLenSq;
+  t = Math.max(0, Math.min(1, t)); // clamp to the segment, not the infinite line
+  const closestX = a.x + t * abx;
+  const closestY = a.y + t * aby;
+  const dx = p.x - closestX;
+  const dy = p.y - closestY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// Minimum distance (meters) from `point` to the route polyline -- the
+// on-device deviation check. Projects each route segment into a plane
+// centered on `point` itself (recomputed per call; the route is short
+// enough that this is cheap) and takes the smallest point-to-segment
+// distance across all of it. §3: this runs entirely on-device against the
+// already-fetched route geometry, no server round trip per position update.
+function distanceToRouteMeters(point, routeCoords) {
+  if (!routeCoords || routeCoords.length < 2) return Infinity;
+  const p = { x: 0, y: 0 };
+  let minDist = Infinity;
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const a = projectToLocalMeters(point, routeCoords[i]);
+    const b = projectToLocalMeters(point, routeCoords[i + 1]);
+    const d = pointToSegmentDistance(p, a, b);
+    if (d < minDist) minDist = d;
+  }
+  return minDist;
+}
 
 export default function App() {
   const mapRef = useRef(null);
@@ -63,6 +126,7 @@ export default function App() {
   const [routeCoords, setRouteCoords] = useState(null);
   const [startCoord, setStartCoord] = useState(null);
   const [liveCoord, setLiveCoord] = useState(null);
+  const [deviationDistance, setDeviationDistance] = useState(null);
   const [mapReady, setMapReady] = useState(false);
 
   // Auto-fetch once on launch, purely so this screen has something to show
@@ -71,7 +135,6 @@ export default function App() {
   useEffect(() => {
     generateRoute();
   }, []);
-
 
   // Stop the location watch on unmount no matter what state we're in --
   // otherwise a hot-reload or navigating away mid-run leaks a live GPS
@@ -110,6 +173,7 @@ export default function App() {
     setSessionState('generating');
     setRouteCoords(null);
     setLiveCoord(null);
+    setDeviationDistance(null);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
@@ -165,10 +229,12 @@ export default function App() {
       return;
     }
     watchSubscriptionRef.current = await Location.watchPositionAsync(WATCH_OPTIONS, (position) => {
-      setLiveCoord({
+      const coord = {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
-      });
+      };
+      setLiveCoord(coord);
+      setDeviationDistance(distanceToRouteMeters(coord, routeCoords));
     });
   }
 
@@ -201,12 +267,14 @@ export default function App() {
     setRouteCoords(null);
     setStartCoord(null);
     setLiveCoord(null);
+    setDeviationDistance(null);
     setInitialRegion(null);
     setSessionState('idle');
     generateRoute();
   }
 
   const isTracking = sessionState === 'running' || sessionState === 'paused';
+  const isDeviated = isTracking && deviationDistance !== null && deviationDistance > DEVIATION_THRESHOLD_M;
 
   return (
     <View style={styles.container}>
@@ -217,13 +285,21 @@ export default function App() {
             <Polyline coordinates={routeCoords} strokeColor="#2E7D32" strokeWidth={4} />
           )}
           {isTracking && liveCoord && (
-            <Marker coordinate={liveCoord} title="You" pinColor="dodgerblue" />
+            <Marker coordinate={liveCoord} title="You" pinColor={isDeviated ? 'orange' : 'dodgerblue'} />
           )}
         </MapView>
       ) : (
         <View style={styles.placeholder}>
           <Text style={styles.placeholderText}>
             {sessionState === 'generating' ? 'Generating route...' : 'No route yet -- tap the button below.'}
+          </Text>
+        </View>
+      )}
+
+      {isDeviated && (
+        <View style={styles.deviationBanner}>
+          <Text style={styles.deviationBannerText}>
+            ⚠️ Off route -- ~{Math.round(deviationDistance)}m from the path
           </Text>
         </View>
       )}
@@ -287,5 +363,20 @@ const styles = StyleSheet.create({
   buttonRow: {
     flexDirection: 'row',
     justifyContent: 'space-evenly',
+  },
+  deviationBanner: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: '#FB8C00',
+    paddingTop: Platform.OS === 'ios' ? 56 : 16,
+    paddingBottom: 12,
+    paddingHorizontal: 16,
+  },
+  deviationBannerText: {
+    color: '#fff',
+    fontWeight: '600',
+    textAlign: 'center',
   },
 });
