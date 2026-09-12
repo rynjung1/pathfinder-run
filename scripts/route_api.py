@@ -30,6 +30,11 @@ Endpoints:
     -> 400: missing/invalid lat/lon, or no routable way near that point
     -> 502: GraphHopper unreachable
 
+    PATCH /closures/<id> -- mark one report resolved (basic clear
+    mechanism; no time-based decay/expiry yet -- see closures.py).
+    -> 200: {"id", "status": "resolved"}
+    -> 404: no closure with that id
+
 Usage:
     python3 scripts/route_api.py
     curl -X POST http://localhost:5001/route \
@@ -38,6 +43,7 @@ Usage:
     curl -X POST http://localhost:5001/closures \
         -H "Content-Type: application/json" \
         -d '{"lat": 43.4643, "lon": -80.5204}'
+    curl -X PATCH http://localhost:5001/closures/1
 """
 import sys
 
@@ -51,7 +57,13 @@ from generate_loop import (
     candidates_to_geojson,
     generate_candidates,
 )
-from closures import ensure_schema, get_active_closure_way_ids, snap_to_way_id, store_closure
+from closures import (
+    ensure_schema,
+    get_active_closure_way_ids,
+    resolve_closure,
+    snap_to_way_id,
+    store_closure,
+)
 
 app = Flask(__name__)
 ensure_schema()
@@ -128,6 +140,13 @@ def report_closure():
 
     closure_id = store_closure(way_id)
     return jsonify({"id": closure_id, "osm_way_id": way_id, "status": "active"}), 201
+
+
+@app.route("/closures/<int:closure_id>", methods=["PATCH"])
+def resolve_closure_route(closure_id):
+    if not resolve_closure(closure_id):
+        return jsonify({"error": f"no closure with id {closure_id}"}), 404
+    return jsonify({"id": closure_id, "status": "resolved"})
 
 
 @app.route("/health", methods=["GET"])

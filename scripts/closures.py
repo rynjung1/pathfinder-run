@@ -2,11 +2,16 @@
 """
 Pathfinder Run -- crowdsourced closure reporting, §6/§7 step 5.
 
-Scope, deliberately narrow: this is the *reporting* pipeline only -- a
-report lands in storage, matched to a real osm_way_id. It is NOT wired
-into the routing cost function yet (a separate, later step once reporting
-actually works), and it does NOT implement decay/expiry -- the schema just
-avoids precluding it (see `status` and `reported_at` below).
+Scope: reporting (store_closure), reading active closures for the routing
+cost function (get_active_closure_way_ids, wired into generate_loop.py),
+and resolving a report (resolve_closure) -- a basic explicit "this is
+clear now" mechanism, not time-based decay/expiry. Decay/expiry is still
+NOT implemented -- the schema just avoids precluding it (see `status` and
+`reported_at` below). Resolve was added as soon as closures started
+actually affecting routing: once a report can make GraphHopper avoid a
+way, having no way to undo one is a real gap, not deferred polish -- a
+closure that's actually been cleared would otherwise keep excluding that
+way from every route indefinitely.
 
 Storage: SQLite, not PostGIS, deliberately. Reasoning (see conversation
 notes from the storage investigation before this was built):
@@ -97,6 +102,30 @@ def get_active_closure_way_ids(db_path=DEFAULT_DB_PATH):
             "SELECT DISTINCT osm_way_id FROM closures WHERE status = 'active'"
         ).fetchall()
         return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+
+def resolve_closure(closure_id, db_path=DEFAULT_DB_PATH):
+    """Mark one closure report resolved -- the basic clear mechanism that
+    was missing when closures were first wired into routing (see module
+    docstring). Deliberately simple: an explicit "this has been resolved"
+    by id, not time-based decay/expiry, and not scoped to a way_id (a way
+    can have multiple independent reports; this resolves the one report,
+    not "everything on this way").
+
+    Returns True if a row with this id existed and was updated, False if
+    no such id exists. Idempotent otherwise -- resolving an
+    already-resolved row is a no-op that still returns True, since the
+    row does exist and ends up in the desired state either way."""
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE closures SET status = 'resolved' WHERE id = ?",
+            (closure_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 
