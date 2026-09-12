@@ -94,6 +94,17 @@ DEFAULT_MAX_DISTANCE_FRACTION = 2.0    # above this multiple of target, also tre
                                        # rescale diverge to candidates at 23281m/36397m for an 8000m
                                        # target instead of converging.
 DEFAULT_COMPACTNESS_WEIGHT = 20  # ad hoc weight, revisit later -- see score_candidate's docstring
+DEFAULT_CLOSURE_MULTIPLIER = 0  # hard exclusion, NOT the edge-reuse's 0.01 -- see fetch_return_leg's
+                                 # docstring. Verified empirically against the running server: 0.01
+                                 # only discourages (a way can still get used if the detour around it
+                                 # costs more than the 99%-discounted-but-nonzero penalty -- observed
+                                 # directly on a real way that stayed in the route at multiply_by=0.01
+                                 # but was fully routed around once dropped to 0). A closure is a fact
+                                 # ("this is not passable"), not a preference, so it needs the stronger
+                                 # guarantee: multiply_by=0 makes the edge's weight infinite, so
+                                 # GraphHopper only ever uses it if literally no other path exists --
+                                 # in which case the request fails with no route rather than silently
+                                 # routing a runner through a closure.
 
 
 def destination_point(lat, lon, bearing_deg, distance_m):
@@ -127,18 +138,42 @@ def _request(url, body=None, method="GET"):
     return parsed["paths"][0]
 
 
-def fetch_outbound_leg(base_url, start_lat, start_lon, far_lat, far_lon, profile):
-    """Plain route, no penalty -- also requests osm_way_id details so we know
-    which ways to penalize on the way back."""
-    params = [
-        ("point", f"{start_lat},{start_lon}"),
-        ("point", f"{far_lat},{far_lon}"),
-        ("profile", profile),
-        ("points_encoded", "false"),
-        ("details", "osm_way_id"),
-    ]
-    url = f"{base_url}/route?" + urllib.parse.urlencode(params)
-    return _request(url)
+def fetch_outbound_leg(base_url, start_lat, start_lon, far_lat, far_lon, profile,
+                        closed_way_ids=None, closure_multiplier=DEFAULT_CLOSURE_MULTIPLIER):
+    """Route out, no edge-reuse penalty (there's nothing to reuse yet) --
+    also requests osm_way_id details so we know which ways to penalize on
+    the way back.
+
+    Closures DO apply here, unlike edge-reuse: a real closure blocks a way
+    in both directions, so the outbound leg needs to avoid it too, not just
+    the return leg. When closed_way_ids is empty (the common case -- no
+    active closures), this stays the original plain CH-speed-mode GET, so
+    the no-closures path pays no extra latency. Only switches to a
+    ch.disable POST with a custom_model when there's actually something to
+    avoid."""
+    if not closed_way_ids:
+        params = [
+            ("point", f"{start_lat},{start_lon}"),
+            ("point", f"{far_lat},{far_lon}"),
+            ("profile", profile),
+            ("points_encoded", "false"),
+            ("details", "osm_way_id"),
+        ]
+        url = f"{base_url}/route?" + urllib.parse.urlencode(params)
+        return _request(url)
+
+    condition = " || ".join(f"osm_way_id == {way_id}" for way_id in closed_way_ids)
+    body = {
+        "points": [[start_lon, start_lat], [far_lon, far_lat]],
+        "profile": profile,
+        "points_encoded": False,
+        "details": ["osm_way_id"],
+        "ch.disable": True,
+        "custom_model": {
+            "priority": [{"if": condition, "multiply_by": str(closure_multiplier)}]
+        },
+    }
+    return _request(f"{base_url}/route", body=body, method="POST")
 
 
 def used_way_ids(path):
@@ -147,21 +182,41 @@ def used_way_ids(path):
 
 
 def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
-                      avoid_way_ids, penalty_multiplier):
-    """Route back, penalizing every way used on the outbound leg. Merges with
-    (does not replace) the profile's base custom model -- confirmed
-    empirically, not assumed.
+                      avoid_way_ids, penalty_multiplier,
+                      closed_way_ids=None, closure_multiplier=DEFAULT_CLOSURE_MULTIPLIER):
+    """Route back, penalizing every way used on the outbound leg, AND
+    excluding any currently-closed way. Two independent `priority` if-blocks
+    in one custom_model, one per concern -- merges with (does not replace)
+    the profile's base custom model, and the two blocks combine
+    multiplicatively rather than one overriding the other. Both confirmed
+    empirically against the running server, not assumed:
+    a way penalized by two independent same-condition if-blocks at 0.97
+    each behaved identically (same route, same avoidance threshold) to a
+    single block at 0.9409 (=0.97*0.97), in both block orders -- i.e. this
+    really is a product of independent factors, not last-write-wins or
+    first-match-wins.
 
-    Known, unfixed limitation: this penalizes by whole osm_way_id, not by the
-    specific segment actually walked. A way-length audit of the clipped
-    extract found 153 ways over 1km (worst case: Cambridge to Paris Rail
-    Trail at 6.9km, also Kissing Bridge Trailway at 4.0km) -- touching a
-    short stretch of one of those blanket-penalizes the entire remaining
-    length for the return leg, the same shape of problem as the power-line
-    ways found during the region-clip work. Not rare for this app
-    specifically: it preferentially routes onto trails, so trail ways are
-    disproportionately likely to get used. A real fix needs per-segment
-    identity (e.g. splitting the penalty by distance-along-way) or a
+    Deliberately different multipliers for the two concerns: edge-reuse
+    uses a small-but-nonzero discourage (penalty_multiplier, default 0.01)
+    because a repeated way is merely undesirable -- it's fine as a last
+    resort if every other option is worse. A closure uses a hard 0
+    (closure_multiplier / DEFAULT_CLOSURE_MULTIPLIER) because it's not a
+    preference, it's a fact: the way cannot be used at all if any other
+    path exists. If a way is BOTH reused and closed, the two blocks still
+    apply independently (0.01 * 0 = 0) -- closure wins, correctly, since
+    it's the more restrictive of the two regardless of which block is
+    listed first.
+
+    Known, unfixed limitation: both penalties apply by whole osm_way_id,
+    not by the specific segment actually walked/closed. A way-length audit
+    of the clipped extract found 153 ways over 1km (worst case: Cambridge
+    to Paris Rail Trail at 6.9km, also Kissing Bridge Trailway at 4.0km) --
+    touching a short stretch of one of those blanket-penalizes (or, for a
+    closure, blanket-EXCLUDES) the entire remaining length. Not rare for
+    this app specifically: it preferentially routes onto trails, so trail
+    ways are disproportionately likely to get used, and a closure reported
+    anywhere on a long trail closes the whole thing. A real fix needs
+    per-segment identity (e.g. splitting by distance-along-way) or a
     length-threshold fallback to geometry buffering for long ways -- neither
     implemented here."""
     body = {
@@ -170,14 +225,19 @@ def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
         "points_encoded": False,
         "details": ["osm_way_id"],
     }
+    priority_blocks = []
     if avoid_way_ids:
         condition = " || ".join(f"osm_way_id == {way_id}" for way_id in avoid_way_ids)
+        priority_blocks.append({"if": condition, "multiply_by": str(penalty_multiplier)})
+    if closed_way_ids:
+        condition = " || ".join(f"osm_way_id == {way_id}" for way_id in closed_way_ids)
+        priority_blocks.append({"if": condition, "multiply_by": str(closure_multiplier)})
+    if priority_blocks:
         body["ch.disable"] = True
-        body["custom_model"] = {
-            "priority": [{"if": condition, "multiply_by": str(penalty_multiplier)}]
-        }
-    # else: nothing to avoid (shouldn't happen in practice) -- fall through to
-    # a plain CH request with no penalty.
+        body["custom_model"] = {"priority": priority_blocks}
+    # else: nothing to avoid or close (shouldn't happen in practice for
+    # avoid_way_ids -- the outbound leg always touches at least one way) --
+    # fall through to a plain CH request with no penalty.
     return _request(f"{base_url}/route", body=body, method="POST")
 
 
@@ -266,13 +326,15 @@ def candidates_to_geojson(candidates, start_lat, start_lon, target_distance_m):
     }
 
 
-def _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier):
+def _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier,
+                     closed_way_ids=None):
     """One outbound + penalized-return leg pair at a given far point. Raises
     on failure -- caller decides how to handle it."""
-    outbound = fetch_outbound_leg(base_url, lat, lon, far_lat, far_lon, profile)
+    outbound = fetch_outbound_leg(base_url, lat, lon, far_lat, far_lon, profile, closed_way_ids)
     outbound_ways = used_way_ids(outbound)
     return_leg = fetch_return_leg(
         base_url, far_lat, far_lon, lat, lon, profile, outbound_ways, penalty_multiplier,
+        closed_way_ids,
     )
     return_ways = used_way_ids(return_leg)
     reused = set(outbound_ways) & set(return_ways)
@@ -295,7 +357,8 @@ def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penal
                      max_iterations=DEFAULT_MAX_RADIUS_ITERATIONS,
                      tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT,
                      min_distance_fraction=DEFAULT_MIN_DISTANCE_FRACTION,
-                     max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION):
+                     max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION,
+                     closed_way_ids=None):
     """Fetch a full out-and-back candidate for a single bearing, refining the
     far-point radius rather than accepting whatever the fixed
     target_distance/2 straight-line guess produces.
@@ -351,7 +414,8 @@ def build_candidate(base_url, lat, lon, bearing, target_distance, profile, penal
     for iteration in range(1, max_iterations + 1):
         far_lat, far_lon = destination_point(lat, lon, bearing, radius)
         try:
-            attempt = _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier)
+            attempt = _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multiplier,
+                                       closed_way_ids)
         except (urllib.error.URLError, RuntimeError) as e:
             print(f"  bearing {bearing:>5.0f}° iteration {iteration}: skipped ({e})", file=sys.stderr)
             break
@@ -429,12 +493,21 @@ def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_ca
                          max_radius_iterations=DEFAULT_MAX_RADIUS_ITERATIONS,
                          distance_tolerance_pct=DEFAULT_DISTANCE_TOLERANCE_PCT,
                          min_distance_fraction=DEFAULT_MIN_DISTANCE_FRACTION,
-                         max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION):
+                         max_distance_fraction=DEFAULT_MAX_DISTANCE_FRACTION,
+                         closed_way_ids=None):
     """Build and score every candidate for the given start point/target
     distance, one per bearing evenly spread from `bearing`. Returns
     (candidates_sorted_best_first, bearings_tried) -- candidates may be
     fewer than bearings_tried if some failed or were rejected as degenerate
     (see build_candidate).
+
+    closed_way_ids: currently-active closures (§4/§6), fetched ONCE by the
+    caller (route_api.py's /route handler, or main() below via
+    --use-closures) and passed in here rather than queried per-candidate --
+    it's the same closures list for every bearing in one request. Deliberately
+    NOT queried from this module directly: closures.py already imports FROM
+    generate_loop.py (destination_point, fetch_outbound_leg), so importing
+    closures.py here too would create a cycle.
 
     This is the reusable core the CLI (main, below) and the HTTP wrapper
     (route_api.py) both call -- no argparse or printing in here."""
@@ -443,7 +516,7 @@ def generate_candidates(base_url, lat, lon, target_distance, bearing=0.0, num_ca
     for b in bearings:
         c = build_candidate(base_url, lat, lon, b, target_distance, profile,
                              penalty_multiplier, max_radius_iterations, distance_tolerance_pct,
-                             min_distance_fraction, max_distance_fraction)
+                             min_distance_fraction, max_distance_fraction, closed_way_ids)
         if c is not None:
             score, distance_error_pct, reuse_pct, compactness = score_candidate(c, target_distance)
             c["score"], c["distance_error_pct"], c["reuse_pct"], c["compactness"] = score, distance_error_pct, reuse_pct, compactness
@@ -473,15 +546,25 @@ def main():
     parser.add_argument("--graphhopper-url", default=DEFAULT_GRAPHHOPPER_URL, help=f"GraphHopper server base URL (default: {DEFAULT_GRAPHHOPPER_URL})")
     parser.add_argument("--top-n", type=int, default=3, help="Number of top-scoring candidates to keep/return, per §5 point 4's '2-3 alternatives' (default: 3)")
     parser.add_argument("--output", help="Write the top candidates as a GeoJSON FeatureCollection to this file")
+    parser.add_argument("--use-closures", action="store_true",
+                         help="Query scripts/closures.db for active closures and exclude those ways "
+                              "from both legs (imported lazily here, not at module load, to avoid a "
+                              "circular import -- closures.py imports from this module)")
     args = parser.parse_args()
 
     print(f"start:            {args.lat}, {args.lon}")
     print(f"target distance:  {args.distance:.0f} m")
 
+    closed_way_ids = None
+    if args.use_closures:
+        from closures import get_active_closure_way_ids
+        closed_way_ids = get_active_closure_way_ids()
+        print(f"active closures:  {len(closed_way_ids)} way(s) {closed_way_ids}")
+
     candidates, bearings = generate_candidates(
         args.graphhopper_url, args.lat, args.lon, args.distance, args.bearing, args.candidates,
         args.profile, args.penalty_multiplier, args.max_radius_iterations, args.distance_tolerance_pct,
-        args.min_distance_fraction, args.max_distance_fraction,
+        args.min_distance_fraction, args.max_distance_fraction, closed_way_ids,
     )
     print(f"candidates:       {args.candidates} (bearings: {', '.join(f'{b:.0f}°' for b in bearings)})")
     print()

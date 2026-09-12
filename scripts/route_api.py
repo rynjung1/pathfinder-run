@@ -20,8 +20,10 @@ Endpoints:
     -> 400: missing/invalid lat, lon, or distance
     -> 502: GraphHopper unreachable, or no candidate succeeded
 
-    POST /closures -- §6/§7 step 5, reporting only (not wired into routing
-    cost yet -- see closures.py for the storage/snapping design).
+    POST /closures -- §6/§7 step 5. Wired into /route's routing cost as a
+    hard exclusion (see generate_loop.py's fetch_return_leg/fetch_outbound_leg
+    docstrings and closures.py's get_active_closure_way_ids) -- a route
+    request made after a closure report will avoid that way on both legs.
     body: {"lat": 43.4643, "lon": -80.5204}
     optional: "profile" (default "foot")
     -> 201: {"id", "osm_way_id", "status"} -- the stored report
@@ -49,7 +51,7 @@ from generate_loop import (
     candidates_to_geojson,
     generate_candidates,
 )
-from closures import ensure_schema, snap_to_way_id, store_closure
+from closures import ensure_schema, get_active_closure_way_ids, snap_to_way_id, store_closure
 
 app = Flask(__name__)
 ensure_schema()
@@ -80,10 +82,17 @@ def route():
     if num_candidates < 1 or top_n < 1:
         return jsonify({"error": "candidates and top_n must be at least 1"}), 400
 
+    # Active closures apply to every candidate/bearing in this request, so
+    # fetch once here rather than inside generate_candidates -- see that
+    # function's docstring for why it doesn't query closures.py itself
+    # (avoids a circular import; closures.py imports from generate_loop.py).
+    closed_way_ids = get_active_closure_way_ids()
+
     try:
         candidates, _bearings = generate_candidates(
             DEFAULT_GRAPHHOPPER_URL, lat, lon, distance, bearing, num_candidates, profile,
             DEFAULT_REUSE_PENALTY_MULTIPLIER, DEFAULT_MAX_RADIUS_ITERATIONS, DEFAULT_DISTANCE_TOLERANCE_PCT,
+            closed_way_ids=closed_way_ids,
         )
     except Exception as e:  # GraphHopper unreachable or similar -- surface as a gateway error, not a 500
         return jsonify({"error": f"route generation failed: {e}"}), 502

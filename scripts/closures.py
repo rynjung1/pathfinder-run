@@ -79,6 +79,28 @@ def store_closure(osm_way_id, db_path=DEFAULT_DB_PATH):
         conn.close()
 
 
+def get_active_closure_way_ids(db_path=DEFAULT_DB_PATH):
+    """Distinct osm_way_ids currently reported closed, for the routing cost
+    function (§4, §5 point 1's third bullet). Deliberately just `status =
+    'active'` -- no decay/expiry logic exists yet (see module docstring),
+    so an active report stays active until something else marks it
+    otherwise.
+
+    Returns a plain list of ints (empty if none), not a cursor/generator --
+    the caller (generate_loop.py) needs to check truthiness and pass this
+    into two separate GraphHopper requests (outbound + return leg), so a
+    fully-materialized list is simpler than re-querying or holding a
+    connection open across both."""
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT osm_way_id FROM closures WHERE status = 'active'"
+        ).fetchall()
+        return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+
 def snap_to_way_id(base_url, lat, lon, profile="foot"):
     """Resolve a raw (lat, lon) to the nearest routable OSM way.
 
