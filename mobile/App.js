@@ -32,10 +32,10 @@ import { saveRun, getRuns } from './db';
 // - Android foreground service + persistent notification. Confirmed
 //   feasible without ACCESS_BACKGROUND_LOCATION (verified directly from
 //   expo-location's config-plugin source: isAndroidForegroundServiceEnabled
-//   and isAndroidBackgroundLocationEnabled are independent flags), but
-//   deliberately not implemented -- decided not a priority right now, see
-//   the comment on WATCH_OPTIONS/startWatching below for what this means
-//   in practice.
+//   and isAndroidBackgroundLocationEnabled are independent flags) -- but
+//   this is now a final decision NOT to build it, not a "revisit later"
+//   item on a priority queue. See the comment on WATCH_OPTIONS/startWatching
+//   below for what that means in practice.
 // - iOS lock-screen survival is a DIFFERENT, harder case: locking the
 //   screen backgrounds the app (applicationDidEnterBackground fires) same
 //   as switching apps, and continuing location updates through that
@@ -64,9 +64,9 @@ const TARGET_DISTANCE_M = 5000;
 // or the app is backgrounded -- on Android as much as iOS, even though a
 // foreground service *would* let Android keep tracking through a locked
 // screen under ordinary ACCESS_FINE_LOCATION (no ACCESS_BACKGROUND_LOCATION
-// needed -- see the file header). That's confirmed feasible but explicitly
-// not built yet: skipped for now as a lower priority than deviation
-// detection, not because it's hard. If this needs revisiting, it's
+// needed -- see the file header). Confirmed feasible, but this is a final
+// decision not to build it -- not deferred, not a lower-priority item still
+// on the list. If that decision ever gets revisited, it's
 // isAndroidForegroundServiceEnabled in the expo-location config plugin
 // (app.json), not a rewrite of the tracking logic here.
 const WATCH_OPTIONS = {
