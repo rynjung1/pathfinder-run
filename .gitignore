@@ -13,6 +13,19 @@ graphhopper-cache/
 data/osm/
 data/graphhopper/
 
+# Greenness/park-proximity polygons (scripts/build_greenspace.py) --
+# mechanically derived geometry from the raw .osm.pbf extract (also
+# gitignored, above), not source data, and large enough to matter:
+# Waterloo Region's is 2.6MB and grows per city added. Unlike
+# data/long_ways.json (a tiny scalar manifest, kept committed) or
+# data/boundaries/*.geojson (fetched once from Nominatim -- the actual
+# source input, not a byproduct -- kept committed), this is closer in
+# kind to the .pbf extracts it's derived from. Regenerate after
+# obtaining the raw extract: python3 scripts/build_greenspace.py
+# --extract data/raw/<city>-clipped.osm.pbf --output data/greenspace-<city>/greenspace.geojson
+data/greenspace/
+data/greenspace-*/
+
 # Node
 node_modules/
 npm-debug.log*
