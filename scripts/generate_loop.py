@@ -75,8 +75,11 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 EARTH_RADIUS_M = 6371000
+LONG_WAYS_PATH = Path(__file__).parent.parent / "data" / "long_ways.json"  # see audit_long_ways.py
+DEFAULT_WAY_BUFFER_WIDTH_M = 15  # ad hoc, revisit -- see build_way_buffer_polygon's docstring
 DEFAULT_GRAPHHOPPER_URL = "http://localhost:8989"
 DEFAULT_REUSE_PENALTY_MULTIPLIER = 0.01  # how much cheaper an unused way is vs a reused one
 DEFAULT_MAX_RADIUS_ITERATIONS = 4
@@ -181,6 +184,102 @@ def used_way_ids(path):
     return sorted({way_id for _start, _end, way_id in path["details"]["osm_way_id"]})
 
 
+def used_way_segments(path):
+    """Like used_way_ids, but keeps the actual [lon, lat] coordinates each way
+    was traversed at, not just its bare id -- {way_id: [[lon, lat], ...]}.
+    This is what makes the long-way fix possible for edge-reuse: the exact
+    touched stretch is already sitting right here in the outbound leg's own
+    response, for free, no extra request or stored data needed.
+
+    If a way appears in more than one non-contiguous index range (rare, but
+    possible -- e.g. a route crosses the same way twice), all its points are
+    concatenated under one key. build_way_buffer_polygon (below) buffers
+    each consecutive pair, so a gap between two disjoint ranges just
+    produces one extra (harmless, if slightly too generous) connecting
+    segment rather than wrong output -- not worth the extra complexity of
+    tracking ranges separately for how rare this is."""
+    segments = {}
+    coords = path["points"]["coordinates"]
+    for start, end, way_id in path["details"]["osm_way_id"]:
+        segments.setdefault(way_id, []).extend(coords[start:end + 1])
+    return segments
+
+
+def _load_long_way_ids(path=LONG_WAYS_PATH):
+    """way_id -> length_m for every way the offline audit (audit_long_ways.py)
+    found at or above its length threshold, for the current clipped
+    extract. Loaded once per process (module-level cache) -- this file
+    only changes when someone re-runs the audit after re-clipping the
+    extract, never mid-run.
+
+    Missing file is NOT an error: it just means the audit hasn't been run
+    (e.g. a fresh checkout before `python3 scripts/audit_long_ways.py`) --
+    every way is then treated as "not long," which is exactly today's
+    pre-fix behavior (the safe default), not a crash."""
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        raw = json.load(f)
+    return {int(k): v for k, v in raw.items()}
+
+
+_LONG_WAY_IDS_CACHE = None
+
+
+def get_long_way_ids():
+    global _LONG_WAY_IDS_CACHE
+    if _LONG_WAY_IDS_CACHE is None:
+        _LONG_WAY_IDS_CACHE = _load_long_way_ids()
+    return _LONG_WAY_IDS_CACHE
+
+
+def build_way_buffer_polygon(coords, width_m=DEFAULT_WAY_BUFFER_WIDTH_M):
+    """Build a GeoJSON MultiPolygon buffering just the given [lon, lat]
+    coordinate sequence -- the mechanism behind the long-way fix (§5's
+    osm_way_id-blanket-penalty investigation): instead of matching a long
+    way's whole osm_way_id (which penalizes the entire way, including
+    stretches nowhere near what was actually walked), wrap only the
+    actually-touched stretch in a narrow polygon and reference it via
+    custom_model's `areas` + `in_<id>` condition -- confirmed live against
+    the running server that this genuinely restricts the penalty to just
+    that geography, not the whole way (a hard exclusion zone around a
+    ~250m stretch of the real 6.9km Cambridge-to-Paris Rail Trail left the
+    remaining ~6.6km fully usable in the same request).
+
+    Emits one narrow rectangle per consecutive coordinate pair rather than
+    one polygon that follows the whole polyline's outline -- simpler to
+    get right (no self-intersection/mitring logic at bends) at the cost of
+    a small gap or overlap at each joint, which doesn't matter here: the
+    buffer only needs to reliably COVER the touched stretch, not have a
+    precise outline, and a `custom_model` `areas` FeatureCollection is
+    allowed to hold multiple polygons under one id (they union together
+    for `in_<id>` matching).
+
+    width_m=15 is ad hoc, like this codebase's other tunables: wide enough
+    to comfortably cover a trail/path's own width plus a bit of GPS/graph
+    snapping slack, narrow enough not to spill onto a parallel street a
+    real rail-trail or trailway commonly runs beside."""
+    lat0 = coords[0][1]
+    m_per_deg_lat, m_per_deg_lon = _local_meters_per_degree(lat0)
+    half_width = width_m / 2
+    polygons = []
+    for (lon1, lat1), (lon2, lat2) in zip(coords, coords[1:]):
+        x1, y1 = lon1 * m_per_deg_lon, lat1 * m_per_deg_lat
+        x2, y2 = lon2 * m_per_deg_lon, lat2 * m_per_deg_lat
+        dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        if length == 0:
+            continue  # duplicate consecutive point -- no segment to buffer
+        # unit vector perpendicular to the segment, in meters-space
+        nx, ny = -dy / length, dx / length
+        ox, oy = nx * half_width, ny * half_width
+        corners_m = [(x1 + ox, y1 + oy), (x2 + ox, y2 + oy), (x2 - ox, y2 - oy), (x1 - ox, y1 - oy)]
+        ring = [[cx / m_per_deg_lon, cy / m_per_deg_lat] for cx, cy in corners_m]
+        ring.append(ring[0])  # GeoJSON polygons must close their ring
+        polygons.append([ring])
+    return {"type": "MultiPolygon", "coordinates": polygons}
+
+
 def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
                       avoid_way_ids, penalty_multiplier,
                       closed_way_ids=None, closure_multiplier=DEFAULT_CLOSURE_MULTIPLIER):
@@ -207,18 +306,31 @@ def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
     it's the more restrictive of the two regardless of which block is
     listed first.
 
-    Known, unfixed limitation: both penalties apply by whole osm_way_id,
-    not by the specific segment actually walked/closed. A way-length audit
-    of the clipped extract found 153 ways over 1km (worst case: Cambridge
-    to Paris Rail Trail at 6.9km, also Kissing Bridge Trailway at 4.0km) --
-    touching a short stretch of one of those blanket-penalizes (or, for a
-    closure, blanket-EXCLUDES) the entire remaining length. Not rare for
-    this app specifically: it preferentially routes onto trails, so trail
-    ways are disproportionately likely to get used, and a closure reported
-    anywhere on a long trail closes the whole thing. A real fix needs
-    per-segment identity (e.g. splitting by distance-along-way) or a
-    length-threshold fallback to geometry buffering for long ways -- neither
-    implemented here."""
+    Long-way fix (§5's osm_way_id-blanket-penalty investigation), edge-reuse
+    only: avoid_way_ids may now be either a plain iterable of way ids
+    (legacy/direct-call form -- always whole-way OR-chain, unchanged) or a
+    dict {way_id: [[lon, lat], ...]} as produced by used_way_segments(),
+    which is what _fetch_leg_pair actually passes. For a dict, each way is
+    checked against the offline long-way audit (get_long_way_ids): an
+    ordinary (short) way still goes into the flat OR-chain exactly as
+    before -- zero behavior change, confirmed byte-identical against the
+    pre-fix Uptown Waterloo validation case. A LONG way instead gets its
+    own custom_areas buffer polygon (build_way_buffer_polygon), covering
+    only the coordinates actually touched, referenced by its own
+    `in_<id>` priority block at the same penalty_multiplier -- so touching
+    200m of a 6.9km trail on the outbound leg now costs the return leg
+    only that 200m, not the whole trail.
+
+    Deliberately NOT extended to closed_way_ids/closures: a closure is
+    resolved from a lat/lon down to a bare osm_way_id and nothing else
+    (closures.py's schema has no lat/lon column at all, on purpose --
+    see its module docstring's §3 privacy reasoning), so there is no
+    stored coordinate to buffer a polygon around. A closure on a long way
+    still blanket-excludes the whole way, exactly as before -- a real,
+    known, explicitly out-of-scope gap (a deliberate choice, not an
+    oversight -- extending it would mean storing more location data than
+    the privacy design currently allows, which is its own decision to
+    make on purpose, not a side effect of this fix)."""
     body = {
         "points": [[far_lon, far_lat], [start_lon, start_lat]],
         "profile": profile,
@@ -226,15 +338,41 @@ def fetch_return_leg(base_url, far_lat, far_lon, start_lat, start_lon, profile,
         "details": ["osm_way_id"],
     }
     priority_blocks = []
+    areas = {}
+
     if avoid_way_ids:
-        condition = " || ".join(f"osm_way_id == {way_id}" for way_id in avoid_way_ids)
-        priority_blocks.append({"if": condition, "multiply_by": str(penalty_multiplier)})
+        if isinstance(avoid_way_ids, dict):
+            long_way_ids = get_long_way_ids()
+            short_way_ids = []
+            for way_id, coords in avoid_way_ids.items():
+                if way_id in long_way_ids and len(coords) >= 2:
+                    area_id = f"reuse_{way_id}"
+                    areas[area_id] = build_way_buffer_polygon(coords)
+                    priority_blocks.append({"if": f"in_{area_id}", "multiply_by": str(penalty_multiplier)})
+                else:
+                    short_way_ids.append(way_id)
+        else:
+            short_way_ids = list(avoid_way_ids)
+        if short_way_ids:
+            condition = " || ".join(f"osm_way_id == {way_id}" for way_id in short_way_ids)
+            priority_blocks.append({"if": condition, "multiply_by": str(penalty_multiplier)})
+
     if closed_way_ids:
         condition = " || ".join(f"osm_way_id == {way_id}" for way_id in closed_way_ids)
         priority_blocks.append({"if": condition, "multiply_by": str(closure_multiplier)})
+
     if priority_blocks:
         body["ch.disable"] = True
-        body["custom_model"] = {"priority": priority_blocks}
+        custom_model = {"priority": priority_blocks}
+        if areas:
+            custom_model["areas"] = {
+                "type": "FeatureCollection",
+                "features": [
+                    {"type": "Feature", "id": area_id, "properties": {}, "geometry": geometry}
+                    for area_id, geometry in areas.items()
+                ],
+            }
+        body["custom_model"] = custom_model
     # else: nothing to avoid or close (shouldn't happen in practice for
     # avoid_way_ids -- the outbound leg always touches at least one way) --
     # fall through to a plain CH request with no penalty.
@@ -249,6 +387,17 @@ def combine_legs(outbound, return_leg):
     return out_coords + back_coords[1:]
 
 
+def _local_meters_per_degree(lat0):
+    """Equirectangular local projection scale factors at a given latitude --
+    fine at the scale of a single loop or a short way segment, not for
+    anything spanning enough latitude for the small-angle approximation to
+    break down. Shared by polygon_area_m2 (below) and
+    build_way_buffer_polygon (§5's long-way over-penalization fix)."""
+    m_per_deg_lat = EARTH_RADIUS_M * math.pi / 180
+    m_per_deg_lon = m_per_deg_lat * math.cos(math.radians(lat0))
+    return m_per_deg_lat, m_per_deg_lon
+
+
 def polygon_area_m2(coords):
     """Shoelace formula in a local equirectangular projection (fine at the
     scale of a single loop). A self-overlapping ring -- e.g. a return leg
@@ -257,8 +406,7 @@ def polygon_area_m2(coords):
     there-and-back that barely diverges should read as enclosing ~zero
     area, not need separate overlap-detection logic."""
     lat0 = coords[0][1]
-    m_per_deg_lat = EARTH_RADIUS_M * math.pi / 180
-    m_per_deg_lon = m_per_deg_lat * math.cos(math.radians(lat0))
+    m_per_deg_lat, m_per_deg_lon = _local_meters_per_degree(lat0)
     pts = [(lon * m_per_deg_lon, lat * m_per_deg_lat) for lon, lat in coords]
     area = 0
     for i in range(len(pts) - 1):
@@ -331,9 +479,14 @@ def _fetch_leg_pair(base_url, lat, lon, far_lat, far_lon, profile, penalty_multi
     """One outbound + penalized-return leg pair at a given far point. Raises
     on failure -- caller decides how to handle it."""
     outbound = fetch_outbound_leg(base_url, lat, lon, far_lat, far_lon, profile, closed_way_ids)
-    outbound_ways = used_way_ids(outbound)
+    # A dict (way_id -> touched coords), not just a list of ids -- lets
+    # fetch_return_leg apply the long-way buffer-polygon fix instead of a
+    # whole-way OR-chain where it's actually needed. See used_way_segments
+    # and fetch_return_leg's docstrings.
+    outbound_segments = used_way_segments(outbound)
+    outbound_ways = sorted(outbound_segments.keys())
     return_leg = fetch_return_leg(
-        base_url, far_lat, far_lon, lat, lon, profile, outbound_ways, penalty_multiplier,
+        base_url, far_lat, far_lon, lat, lon, profile, outbound_segments, penalty_multiplier,
         closed_way_ids,
     )
     return_ways = used_way_ids(return_leg)
