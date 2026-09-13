@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # Runs GraphHopper for Pathfinder Run pinned to JDK 17, regardless of whatever
-# `java` resolves to on this machine (config.yml requires Java 17+; do not
-# rely on system default).
+# `java` resolves to on this machine (config-ontario.yml requires Java 17+;
+# do not rely on system default).
 #
-# Takes an optional config file as the first argument (default: config.yml),
-# so the same script runs either city's instance -- e.g.
-#   ./run-graphhopper.sh                 # Waterloo Region, port 8989
-#   ./run-graphhopper.sh config-guelph.yml   # Guelph, port 8991
-# Both can run at once (see config-guelph.yml's header for what actually
-# differs between the two configs -- ports, data paths, log files, nothing
-# else).
+# Takes an optional config file as the first argument (default:
+# config-ontario.yml) -- e.g. ./run-graphhopper.sh config-ontario.yml
+#
+# -Xmx10g: found the hard way -- this machine's default JVM heap ergonomic
+# is exactly 4GB (confirmed via -XX:+PrintFlagsFinal), but importing the
+# full-Ontario graph with the real (province-wide) greenspace.geojson
+# loaded pushed live heap usage as high as ~9.3GB during subnetwork
+# marking. Launched without an explicit -Xmx once, right after this was
+# discovered, and it would have OOM'd partway through an 8-minute import.
+# Applied universally here (not just for the Ontario config) since it's
+# just a ceiling, not a reservation -- costs nothing for a small graph
+# that never approaches it, and there's only ever one GraphHopper
+# instance running at a time post-Ontario-migration anyway.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-CONFIG_FILE="${1:-config.yml}"
+CONFIG_FILE="${1:-config-ontario.yml}"
 if [ $# -gt 0 ]; then
   shift
 fi
@@ -36,4 +42,4 @@ export JAVA_HOME
 echo "Using JAVA_HOME=$JAVA_HOME"
 "$JAVA_HOME/bin/java" -version
 
-exec "$JAVA_HOME/bin/java" -jar graphhopper-web.jar server "$CONFIG_FILE" "$@"
+exec "$JAVA_HOME/bin/java" -Xmx10g -jar graphhopper-web.jar server "$CONFIG_FILE" "$@"

@@ -1,58 +1,53 @@
 #!/usr/bin/env python3
 """
-Pathfinder Run -- multi-city registry, §0's "expand to additional cities."
+Pathfinder Run -- coverage registry, §0's "expand to additional cities."
 
-Investigated before implementing (see the Guelph-expansion commit's
-message): one GraphHopper process holds exactly one imported graph, so
-supporting a second city means a second, wholly separate GraphHopper
-instance (config-guelph.yml, its own port, its own graph-cache) running
-alongside the first -- not a multi-graph trick inside one process.
+History: this started as a genuine multi-instance dispatcher -- one
+GraphHopper process per city (Waterloo Region on 8989, Guelph on 8991),
+resolved by point-in-polygon against each city's own boundary. That was
+the right call at the time (two small city extracts), but it doesn't
+scale to "add a city" as a recurring operation: every new city meant
+standing up, and forever running, another whole GraphHopper process.
 
-That leaves route_api.py needing to know which instance to query for a
-given request. This resolves that by point-in-polygon against each city's
-real administrative boundary (already on hand from the boundary-fetch step
-that produced data/boundaries/*.geojson), not an explicit city parameter
-from the client. Reasoning: the mobile client's contract today is "send
-your current lat/lon, get a route back" -- no city concept exists on the
-client side, and adding one would mean UI work (a picker, or the client
-doing its own boundary math) to solve a problem the server can solve
-transparently instead. A third city added later needs one new entry in
-CITIES below and zero client changes.
+Investigated before rebuilding this (see the full-Ontario feasibility
+commits): one big instance covering the entire province is not just
+possible but comfortably so on ordinary hardware -- a real, full-Ontario
+import (137M raw nodes) completed in ~8 minutes and ~4GB peak memory,
+with the real province-wide greenness data loaded, and the resulting
+routes are byte-identical to what the old per-city instances produced
+(confirmed directly: the Uptown Waterloo and Guelph regression cases both
+came back exact matches from the single Ontario instance). So this module
+is now a single GraphHopper URL plus ONE coverage check, not a dispatcher
+choosing between several.
 
-Known, deliberately out-of-scope-for-now limitation: closures.py's
-get_active_closure_way_ids() returns every active closure regardless of
-which city reported it, and every one gets folded into the OR-chain
-condition for every request, including ones for a different city's
-GraphHopper instance. This is NOT a correctness bug -- OSM way ids are
-globally unique, so a Waterloo closure's way_id will simply never match
-any edge in Guelph's own graph, the condition is just always-false noise
-for that instance -- but it doesn't scale cleanly: the OR-chain grows
-with total closures across every city, not just the relevant one. Not
-fixed here (deliberately) since it isn't a real problem yet at this
-scale; the fix, if it's ever needed, is a `city` column on the closures
-table, filtered by resolve_city()'s result.
+The coverage check itself didn't go away, and shouldn't: a request from
+clearly outside Ontario (say, a user testing from another province) needs
+a clean "no coverage here" 400, not a nonsense route computed against a
+graph that was never built to cover that location, and not a confusing
+low-level GraphHopper error. `resolve_city()` keeps the exact same
+point-in-polygon shape as before -- now checked against
+data/boundaries/ontario.geojson instead of a per-city boundary -- so
+route_api.py needed zero changes beyond this file's own contents.
+
+Adding a real second GraphHopper region again (a different country, say)
+would mean going back to a real CITIES list with more than one entry --
+this module still supports that shape, it just currently holds one.
 """
 import json
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 
-# Adding a city: append one entry here (boundary file, the GraphHopper
-# instance serving it, and its own long-way audit -- see
-# generate_loop.py's get_long_way_ids/audit_long_ways.py). Nothing else in
-# this module needs to change.
+# A single entry today (Ontario), but still a list -- this module's shape
+# already supports more than one region if that's ever needed again (e.g.
+# a genuinely separate country/province graph), it's just not needed for
+# "another city" anymore now that one instance covers the whole province.
 CITIES = [
     {
-        "name": "waterloo-region",
-        "boundary_path": DATA_DIR / "boundaries" / "region-of-waterloo.geojson",
-        "base_url": "http://localhost:8989",
-        "long_ways_path": DATA_DIR / "long_ways.json",
-    },
-    {
-        "name": "guelph",
-        "boundary_path": DATA_DIR / "boundaries" / "guelph.geojson",
-        "base_url": "http://localhost:8991",
-        "long_ways_path": DATA_DIR / "long_ways_guelph.json",
+        "name": "ontario",
+        "boundary_path": DATA_DIR / "boundaries" / "ontario.geojson",
+        "base_url": "http://localhost:8995",
+        "long_ways_path": DATA_DIR / "long_ways_ontario.json",
     },
 ]
 
@@ -61,8 +56,8 @@ def _point_in_ring(x, y, ring):
     """Standard ray-casting point-in-polygon test -- the same technique
     (independently reimplemented, same short form) already used this
     session for the greenspace and long-way-buffer geometry work. Not
-    worth a geometry library dependency for point checks against a
-    handful of city polygons."""
+    worth a geometry library dependency for a coverage check against one
+    (or a handful of) region polygon(s)."""
     n = len(ring)
     inside = False
     j = n - 1
@@ -76,11 +71,11 @@ def _point_in_ring(x, y, ring):
 
 
 def _point_in_geometry(lon, lat, geometry):
-    """Handles both Polygon (rings, first is exterior) and MultiPolygon
-    (a list of such ring-lists) -- Guelph's boundary happens to be a
-    single Polygon, Waterloo Region's too, but this doesn't assume that
-    stays true for every future city. Interior holes (a ring after the
-    first) aren't checked -- no city boundary used here has one."""
+    """Handles both Polygon (rings, first is exterior) and MultiPolygon (a
+    list of such ring-lists) -- Ontario's boundary happens to be a single
+    Polygon (confirmed: 26,262-point outer ring, no holes), but this
+    doesn't assume that stays true forever. Interior holes (a ring after
+    the first) aren't checked -- Ontario's boundary doesn't have one."""
     if geometry["type"] == "Polygon":
         return _point_in_ring(lon, lat, geometry["coordinates"][0])
     if geometry["type"] == "MultiPolygon":
@@ -92,9 +87,10 @@ _LOADED_CITIES = None
 
 
 def _load_cities():
-    """Reads each city's boundary GeoJSON once per process and caches the
-    parsed geometry alongside its config -- these files don't change at
-    runtime, no reason to re-parse per request."""
+    """Reads each region's boundary GeoJSON once per process and caches
+    the parsed geometry alongside its config -- these files don't change
+    at runtime, no reason to re-parse per request. (Ontario's boundary is
+    700KB of coordinates -- parsed once at first use, not per request.)"""
     global _LOADED_CITIES
     if _LOADED_CITIES is None:
         loaded = []
@@ -108,13 +104,14 @@ def _load_cities():
 
 
 def resolve_city(lat, lon):
-    """Which city's GraphHopper instance a (lat, lon) belongs to. Returns
-    the matching city dict ({"name", "boundary_path", "base_url", ...})
-    or None if the point falls outside every known city's boundary -- the
-    caller should surface that as "no coverage here," not silently fall
-    back to a default instance (a point outside every boundary has no
-    graph that actually covers it; guessing one would just produce a
-    confusing wrong-city routing failure instead of a clear one)."""
+    """Which region's GraphHopper instance a (lat, lon) belongs to.
+    Returns the matching entry ({"name", "boundary_path", "base_url",
+    "long_ways_path"}) or None if the point falls outside every known
+    region's boundary -- the caller should surface that as "no coverage
+    here," not silently fall back to a default instance (a point outside
+    every boundary has no graph that actually covers it; guessing one
+    would just produce a confusing wrong-region routing failure instead
+    of a clear one)."""
     for city in _load_cities():
         if _point_in_geometry(lon, lat, city["geometry"]):
             return city

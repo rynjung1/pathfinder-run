@@ -78,9 +78,20 @@ import urllib.request
 from pathlib import Path
 
 EARTH_RADIUS_M = 6371000
-LONG_WAYS_PATH = Path(__file__).parent.parent / "data" / "long_ways.json"  # see audit_long_ways.py
+# The full-Ontario instance's own audit (see audit_long_ways.py), not
+# Waterloo Region's data/long_ways.json -- kept as this module's default
+# so the CLI's standalone usage (no --graphhopper-url override) stays
+# internally consistent with DEFAULT_GRAPHHOPPER_URL below, which now
+# points at the same Ontario instance, not a leftover Waterloo-only
+# default. route_api.py doesn't use this default at all -- it always
+# resolves and passes the correct path via cities.py.
+LONG_WAYS_PATH = Path(__file__).parent.parent / "data" / "long_ways_ontario.json"
 DEFAULT_WAY_BUFFER_WIDTH_M = 15  # ad hoc, revisit -- see build_way_buffer_polygon's docstring
-DEFAULT_GRAPHHOPPER_URL = "http://localhost:8989"
+# Port 8995, the full-Ontario production instance (§0) -- NOT 8989, which
+# was Waterloo Region's dedicated port before that instance was
+# decommissioned in favor of the single province-wide graph. Nothing
+# listens on 8989 anymore.
+DEFAULT_GRAPHHOPPER_URL = "http://localhost:8995"
 DEFAULT_REUSE_PENALTY_MULTIPLIER = 0.01  # how much cheaper an unused way is vs a reused one
 DEFAULT_MAX_RADIUS_ITERATIONS = 4
 DEFAULT_DISTANCE_TOLERANCE_PCT = 5.0  # matches docs/running-app-architecture.md §5 point 3

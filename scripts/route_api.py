@@ -10,13 +10,17 @@ Just enough for the React Native side to request a route and get GeoJSON
 back. Auth/rate-limiting/etc. are real requirements before this is anything
 but a local dev server -- not addressed here.
 
-Multi-city (§0's "expand to additional cities"): this single Flask app
-fronts multiple GraphHopper instances, one per city (cities.py), and
-resolves which one to query per-request via point-in-polygon on the
-request's own lat/lon against each city's real boundary -- see
-cities.py's module docstring for the investigation this was based on.
-The client never specifies a city; a location outside every known city's
-boundary gets a plain 400, not a guess.
+Coverage (§0's "expand to additional cities"): fronts one GraphHopper
+instance covering the full province of Ontario (cities.py) -- this
+started as a genuine per-city dispatcher (a separate instance each for
+Waterloo Region and Guelph) but a real feasibility check found one
+instance can cover the whole province comfortably (~8 minute import,
+~4GB peak memory), so that's what actually runs now; see cities.py's
+module docstring for the history and the investigation this was based
+on. A point-in-polygon coverage check against Ontario's real boundary
+still runs on every request -- a location outside Ontario gets a plain
+400, not a guess or a nonsense route. The client never specifies a
+region; this was true before Guelph existed and stays true now.
 
 Endpoints:
     POST /route
@@ -103,11 +107,10 @@ def route():
     if num_candidates < 1 or top_n < 1:
         return jsonify({"error": "candidates and top_n must be at least 1"}), 400
 
-    # Multi-city dispatch (§0's "expand to additional cities") -- see
-    # cities.py's module docstring for the investigation/reasoning. Point-in-
-    # polygon against each city's real boundary, not a client-supplied city
-    # name: the client's contract stays "send lat/lon, get a route," exactly
-    # as before Guelph existed.
+    # Coverage check against Ontario's real boundary -- see cities.py's
+    # module docstring for the history/reasoning. Not a client-supplied
+    # region name: the client's contract stays "send lat/lon, get a
+    # route," unchanged since before Guelph existed.
     city = resolve_city(lat, lon)
     if city is None:
         return jsonify({"error": "no routing coverage for this location"}), 400
