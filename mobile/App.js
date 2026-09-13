@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, FlatList } from 'react-native';
+import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import MapView, { Polyline, Marker } from 'react-native-maps';
@@ -190,6 +190,13 @@ function formatDistance(meters) {
 
 export default function App() {
   const mapRef = useRef(null);
+  // A separate ref/onMapReady flag from the main session map above -- this
+  // is a different MapView instance (mounted only on the run-detail screen,
+  // §7's "route replay-on-map for a past run"), and fitToCoordinates has the
+  // same "native view must finish its first layout first" requirement as
+  // the main map's own effect below, so it needs its own readiness signal.
+  const replayMapRef = useRef(null);
+  const [replayMapReady, setReplayMapReady] = useState(false);
   const watchSubscriptionRef = useRef(null);
 
   // The full GPS trace for the run in progress -- a plain ref, not React
@@ -229,6 +236,11 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [pastRuns, setPastRuns] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  // Which past run's replay is showing, or null for the plain list --
+  // §2's "route replay-on-map for a past run." Holds the whole run record
+  // (including its trace) from pastRuns, not just an id, since the list is
+  // already in memory and there's nothing to re-fetch.
+  const [selectedRun, setSelectedRun] = useState(null);
 
   // Derived, not stored -- the coords of whichever candidate is currently
   // selected. Used for the deviation check, the single-route render once a
@@ -284,6 +296,26 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [mapReady, candidates]);
+
+  // Same fitToCoordinates approach as above, applied to the run-detail
+  // screen's map instead of the main session one: fit to the recorded
+  // trace's actual extent, not a fixed-delta box, and gated on this map's
+  // own onMapReady for the same reason (a fit called before the native view
+  // has finished its first layout is a no-op on iOS). Depends on
+  // selectedRun (not just replayMapReady) so picking a different run from
+  // the list re-fits to that run's own trace, even though the MapView
+  // component instance itself doesn't remount between selections.
+  useEffect(() => {
+    if (replayMapReady && replayMapRef.current && selectedRun && selectedRun.trace.length > 0) {
+      const timer = setTimeout(() => {
+        replayMapRef.current?.fitToCoordinates(selectedRun.trace, {
+          edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
+          animated: true,
+        });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [replayMapReady, selectedRun]);
 
   async function generateRoute() {
     setSessionState('generating');
@@ -459,6 +491,7 @@ export default function App() {
 
   async function openHistory() {
     setShowHistory(true);
+    setSelectedRun(null);
     setLoadingHistory(true);
     try {
       const runs = await getRuns();
@@ -472,6 +505,20 @@ export default function App() {
 
   function closeHistory() {
     setShowHistory(false);
+    setSelectedRun(null);
+  }
+
+  // Tapping a row in the past-runs list -- shows that run's actual
+  // recorded trace on a map (see the replayMapReady effect above), not the
+  // originally-generated route (that's not what's captured/stored; the
+  // trace IS the ground truth of where the run actually went).
+  function viewRunReplay(run) {
+    setReplayMapReady(false);
+    setSelectedRun(run);
+  }
+
+  function closeRunReplay() {
+    setSelectedRun(null);
   }
 
   function handleReset() {
@@ -494,6 +541,48 @@ export default function App() {
   // in-run controls, and there's nothing new to show mid-run anyway.
   const canShowHistory = sessionState === 'idle' || sessionState === 'ready' || sessionState === 'done';
 
+  if (showHistory && selectedRun) {
+    // Route replay -- §2's "route replay-on-map for a past run." Reuses
+    // the same MapView/Polyline/fitToCoordinates pattern as the main
+    // session map above, applied to selectedRun.trace (the actual
+    // recorded GPS points, already {latitude, longitude, timestamp}
+    // objects straight from db.js's getRuns -- no reshaping needed) rather
+    // than a server-generated route. This is deliberately the real path
+    // that was run, jitter and all, not the clean originally-generated
+    // line -- see handleEnd/traceRef for where it was captured.
+    return (
+      <View style={styles.container}>
+        <View style={styles.historyHeader}>
+          <Text style={styles.historyTitle}>{new Date(selectedRun.startedAt).toLocaleString()}</Text>
+          <Button title="Back" onPress={closeRunReplay} />
+        </View>
+        <Text style={styles.runStats}>
+          {formatDistance(selectedRun.actualDistanceM)} (target {formatDistance(selectedRun.targetDistanceM)}) · {formatDuration(selectedRun.durationMs)}
+        </Text>
+        {selectedRun.trace && selectedRun.trace.length > 0 ? (
+          <MapView
+            ref={replayMapRef}
+            style={styles.map}
+            initialRegion={{
+              latitude: selectedRun.trace[0].latitude,
+              longitude: selectedRun.trace[0].longitude,
+              latitudeDelta: 0.03,
+              longitudeDelta: 0.03,
+            }}
+            onMapReady={() => setReplayMapReady(true)}
+          >
+            <Polyline coordinates={selectedRun.trace} strokeColor="#2E7D32" strokeWidth={4} />
+          </MapView>
+        ) : (
+          <View style={styles.placeholder}>
+            <Text style={styles.placeholderText}>No GPS trace recorded for this run.</Text>
+          </View>
+        )}
+        <StatusBar style="auto" />
+      </View>
+    );
+  }
+
   if (showHistory) {
     return (
       <View style={styles.container}>
@@ -512,12 +601,12 @@ export default function App() {
             data={pastRuns}
             keyExtractor={(item) => String(item.id)}
             renderItem={({ item }) => (
-              <View style={styles.runRow}>
+              <TouchableOpacity style={styles.runRow} onPress={() => viewRunReplay(item)}>
                 <Text style={styles.runDate}>{new Date(item.startedAt).toLocaleString()}</Text>
                 <Text style={styles.runStats}>
                   {formatDistance(item.actualDistanceM)} (target {formatDistance(item.targetDistanceM)}) · {formatDuration(item.durationMs)}
                 </Text>
-              </View>
+              </TouchableOpacity>
             )}
           />
         )}
