@@ -6,16 +6,36 @@
 # Takes an optional config file as the first argument (default:
 # config-ontario.yml) -- e.g. ./run-graphhopper.sh config-ontario.yml
 #
-# -Xmx10g: found the hard way -- this machine's default JVM heap ergonomic
-# is exactly 4GB (confirmed via -XX:+PrintFlagsFinal), but importing the
-# full-Ontario graph with the real (province-wide) greenspace.geojson
-# loaded pushed live heap usage as high as ~9.3GB during subnetwork
-# marking. Launched without an explicit -Xmx once, right after this was
-# discovered, and it would have OOM'd partway through an 8-minute import.
-# Applied universally here (not just for the Ontario config) since it's
-# just a ceiling, not a reservation -- costs nothing for a small graph
-# that never approaches it, and there's only ever one GraphHopper
-# instance running at a time post-Ontario-migration anyway.
+# -Xmx10g: found the hard way, back when this was accurate -- this
+# machine's default JVM heap ergonomic is exactly 4GB (confirmed via
+# -XX:+PrintFlagsFinal), and importing the full-Ontario graph with the
+# real (province-wide) greenspace.geojson loaded once pushed live heap
+# usage as high as ~9.3GB during subnetwork marking; launched without an
+# explicit -Xmx right after discovering that, and it would have OOM'd
+# partway through the (then ~8-minute) import.
+#
+# That specific finding is now stale, not current justification --
+# greenness/in_greenspace was removed at province scale (see
+# pathfinder_foot.json's and config-ontario.yml's comments; the
+# disambiguating LM test that led to its removal), so a from-scratch
+# import no longer approaches anywhere near that peak (subnetwork marking
+# alone dropped from ~207s to ~1.6s once greenness was gone -- see
+# config-ontario.yml). See deploy/pathfinder-graphhopper.service's own
+# comment for the current, measured, steady-state-serving number that
+# replaced this reasoning for the production systemd unit (1536m there,
+# not 10g -- production never imports at all, so even the stale ~9.3GB
+# import-time figure was never the right number for that file).
+#
+# Left at 10g here anyway, deliberately, not re-tuned down: this is a
+# ceiling, not a reservation, so it costs nothing on this dev machine's
+# actual RAM either way, and this script is what a local from-scratch
+# reimport still runs through occasionally -- keeping a generous ceiling
+# here means one less thing to re-check if greenness (or some other
+# import-time-heavy mechanism) ever comes back per the filed future item.
+# Applied universally here (not just for the Ontario config) for the same
+# reason -- costs nothing for a small graph that never approaches it, and
+# there's only ever one GraphHopper instance running at a time
+# post-Ontario-migration anyway.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"

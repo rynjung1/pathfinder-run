@@ -5,6 +5,31 @@ automatic HTTPS needs one; it can't issue a cert for a bare IP). This
 documents the assumed layout the two systemd units in this directory
 reference, so step 4 is "follow this," not "figure this out."
 
+## VPS sizing
+
+A small VPS (e.g. Hetzner's CX22, 4GB RAM total) is recommended --
+confirmed against a real measurement, not a guess. The recommended
+budget:
+
+- GraphHopper: 1536MB heap (`-Xmx1536m` in `pathfinder-graphhopper.service`
+  -- see that file's comment for the full measurement writeup and
+  methodology). Measured cold-loading the existing graph-cache (no
+  reimport, matching exactly how the VPS runs it) and serving real
+  routing traffic: ~600-700MB under sustained normal load, with real
+  headroom confirmed directly against up to 40 concurrent requests
+  (1.42-1.55GB peak, zero OOM) -- well beyond the concurrency an
+  early-beta running app should see.
+- route_api.py (waitress, a handful of threads) + Caddy + the OS/systemd
+  itself: a few hundred MB combined, comfortably.
+
+That leaves real slack on a 4GB box, not a tight fit -- the 4GB tier is
+fine. (The previous `-Xmx10g` in the systemd unit was a bug, not a
+sizing decision: it was carried over from this machine's *import-time*
+peak with the since-removed greenness data loaded, a scenario the VPS
+never hits at all since it's designed to rsync a pre-built graph-cache
+rather than ever import on-box -- see "Don't build the graph on the VPS"
+below. 10GB doesn't fit in 4GB regardless of what it was measuring.)
+
 ## Assumed layout on the VPS
 
 ```

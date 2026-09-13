@@ -10,13 +10,54 @@
 # JDK detection (Library/Java vs. Homebrew) exists for this local macOS
 # dev machine specifically; a VPS with a single OS-installed JDK 17
 # (e.g. `apt install openjdk-17-jdk` on Debian/Ubuntu) just needs `java`
-# on PATH, no detection dance required. -Xmx10g carries over unchanged --
-# see run-graphhopper.sh's own comment for why (this machine's finding
-# that the default ~4GB ergonomic heap OOMs partway through an import
-# with the real greenspace data loaded; matters again on the VPS the
-# next time the graph is rebuilt there, if it ever is -- see the
-# feasibility review's recommendation to build off-box and rsync the
-# result instead).
+# on PATH, no detection dance required.
+#
+# -Xmx1536m: measured, not guessed, and NOT the same -Xmx10g run-graphhopper.sh
+# still uses locally. That 10g figure came from this machine's finding that
+# importing the full province with the real (now-removed, see 4c8681d)
+# greenspace.geojson loaded pushed heap usage to ~9.3GB during subnetwork
+# marking -- a real number, but for a scenario that no longer applies here:
+# in_greenspace is gone, and production is designed to never import at all
+# (rsync a pre-built graph-cache -- see deploy/README.md), so the VPS never
+# pays that cost regardless. Carrying 10g over unchanged for THIS unit was
+# the bug -- it doesn't fit in the 4GB tier deploy/README.md recommends.
+#
+# The number that actually matters for this unit is steady-state RSS while
+# SERVING, cold-loaded from an existing graph-cache-ontario (no reimport).
+# Measured directly (this machine, post-greenness-removal, same
+# config-ontario.yml, cold `java -jar graphhopper-web.jar server
+# config-ontario.yml` process, real /route traffic via generate_loop.py's
+# build_candidate across a spread of real Ontario locations/distances, RSS
+# read via `ps`):
+#   - Idle right after loading the 322MB graph-cache (before any traffic):
+#     ~590-670MB RSS.
+#   - 5 minutes of continuous serial real routing traffic: RSS oscillated
+#     585-720MB the whole time, settling back under 900MB once traffic
+#     stopped. Zero errors, zero OOM.
+#   - 16 concurrent request threads for 90s: -Xmx768m (2x the serial
+#     baseline) was NOT enough -- 23 real, logged
+#     java.lang.OutOfMemoryError: Java heap space failures on individual
+#     requests once concurrent in-flight custom_model computations
+#     overlapped, even though the process itself survived and kept serving
+#     other requests. Concurrency, not sustained duration, is what actually
+#     drives peak memory here.
+#   - Re-tested at -Xmx1536m under 24, then 40, concurrent request threads
+#     (well beyond the concurrency an early-beta running app should see) for
+#     2-2.5 minutes each: RSS plateaued at 1.42-1.55GB (a G1GC
+#     characteristic confirmed separately -- it settles around ~95-98% of
+#     whatever ceiling it's given, not some fixed absolute number, so more
+#     concurrency test load didn't push it meaningfully higher once
+#     plateaued) -- zero OOM, zero 500s, thousands of real requests served
+#     each run. -Xmx2g was also re-tested the same way as a comparison
+#     point (zero OOM there either, same ~95-96%-of-ceiling plateau
+#     pattern) but 1536m already has a real, measured margin over even a
+#     40-concurrent-request burst and leaves more of the 4GB tier free for
+#     route_api.py, Caddy, and the OS.
+#
+# 1536m is roughly 2x the measured serial-traffic baseline (585-720MB) and
+# has real headroom demonstrated directly against concurrent load, not
+# inferred from the serial number alone -- see deploy/README.md's sizing
+# section for how this fits the recommended VPS tier.
 #
 # Install:
 #   sudo cp deploy/pathfinder-graphhopper.service /etc/systemd/system/
@@ -34,7 +75,7 @@ Type=simple
 User=pathfinder
 Group=pathfinder
 WorkingDirectory=/opt/pathfinder-run/graphhopper
-ExecStart=/usr/bin/java -Xmx10g -jar graphhopper-web.jar server config-ontario.yml
+ExecStart=/usr/bin/java -Xmx1536m -jar graphhopper-web.jar server config-ontario.yml
 Restart=on-failure
 RestartSec=5
 # Import + CH prep can take several minutes on first start (or after a
