@@ -59,6 +59,24 @@ import { saveRun, getRuns } from './db';
 const API_BASE_URL = 'http://localhost:5001';
 const TARGET_DISTANCE_M = 5000;
 
+// route_api.py's pre-deployment hardening pass added a required X-API-Key
+// header (see that commit's route_api.py docstring) but this client was
+// never updated to send one -- a real gap, found while testing this file
+// against the live backend, not a deliberate v1 scope cut.
+//
+// Read from EXPO_PUBLIC_PATHFINDER_API_KEY, not hardcoded: Expo inlines any
+// env var prefixed EXPO_PUBLIC_ from a local .env file at bundle time (no
+// extra plugin needed, built into Expo SDK 49+) -- put
+// EXPO_PUBLIC_PATHFINDER_API_KEY=<value from scripts/.env's
+// PATHFINDER_API_KEY> in mobile/.env (gitignored, see mobile/.env.example)
+// to run against a real backend. This file is git-tracked, so the actual
+// key must never be written here directly, even temporarily -- the fallback
+// below is a placeholder for exactly that reason, not a working default.
+// Same "not how a shipped app would hold a secret" caveat applies to this
+// whole single-shared-key, no-per-user-auth debug-build model as to
+// route_api.py's own.
+const API_KEY = process.env.EXPO_PUBLIC_PATHFINDER_API_KEY || 'REPLACE_WITH_YOUR_LOCAL_PATHFINDER_API_KEY';
+
 // Known limitation, not an oversight: this is plain watchPositionAsync, no
 // foreground service. Tracking stops silently the moment the screen locks
 // or the app is backgrounded -- on Android as much as iOS, even though a
@@ -191,7 +209,15 @@ export default function App() {
   // idle | generating | ready | running | paused | done
   const [sessionState, setSessionState] = useState('idle');
   const [initialRegion, setInitialRegion] = useState(null);
-  const [routeCoords, setRouteCoords] = useState(null);
+  // All candidates from the server's response (§5 point 4's "2-3
+  // alternatives"), not just the top-ranked one -- see candidates.map in the
+  // render below, and selectedCandidateIndex for which one is picked.
+  // Each entry: {rank, distanceM, coords}. rank 1 (index 0) is the server's
+  // best pick (candidates_to_geojson sorts best-first) and stays selected by
+  // default, so a user who never taps an alternate sees the same route this
+  // screen always showed.
+  const [candidates, setCandidates] = useState(null);
+  const [selectedCandidateIndex, setSelectedCandidateIndex] = useState(0);
   const [startCoord, setStartCoord] = useState(null);
   const [liveCoord, setLiveCoord] = useState(null);
   const [deviationDistance, setDeviationDistance] = useState(null);
@@ -203,6 +229,13 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [pastRuns, setPastRuns] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // Derived, not stored -- the coords of whichever candidate is currently
+  // selected. Used for the deviation check, the single-route render once a
+  // run is underway, and (via handleStart) as "the route" for this session
+  // from that point on.
+  const selectedCandidate = candidates ? candidates[selectedCandidateIndex] : null;
+  const selectedCoords = selectedCandidate ? selectedCandidate.coords : null;
 
   // Auto-fetch once on launch, purely so this screen has something to show
   // without requiring a tap first (useful for a quick screenshot/demo). The
@@ -218,35 +251,44 @@ export default function App() {
     return () => stopWatching();
   }, []);
 
-  // Fit the map to the whole loop once it's loaded, rather than a fixed box
-  // around the start point -- a 5km+ loop routinely runs off the edge of a
-  // fixed-delta region since its actual extent depends on the bearing/shape
-  // GraphHopper picked, not just distance from the start.
+  // Fit the map to every candidate's extent once they're loaded, rather than
+  // a fixed box around the start point -- a 5km+ loop routinely runs off the
+  // edge of a fixed-delta region since its actual extent depends on the
+  // bearing/shape GraphHopper picked, not just distance from the start. All
+  // candidates, not just the selected one, so an alternate the user hasn't
+  // tapped yet is still fully visible/tappable rather than cut off at the
+  // frame edge.
   //
-  // Gated on mapReady (react-native-maps' onMapReady), not just routeCoords:
+  // Gated on mapReady (react-native-maps' onMapReady), not just candidates:
   // calling fitToCoordinates before the native map view has completed its
   // first layout is a known no-op on iOS -- the ref exists (React has
   // mounted and attached it) but the native side isn't ready to compute a
-  // fit yet. Confirmed by testing: gating on routeCoords alone silently did
-  // nothing, framing stayed at the fixed initialRegion delta. The extra
+  // fit yet. Confirmed by testing: gating on the route data alone silently
+  // did nothing, framing stayed at the fixed initialRegion delta. The extra
   // setTimeout is a pragmatic belt-and-suspenders on top of onMapReady --
   // onMapReady alone has been reported flaky on first launch in some
   // react-native-maps versions.
+  //
+  // Deliberately depends on [mapReady, candidates], not selectedCandidateIndex
+  // -- switching which alternate is selected shouldn't re-fit/re-zoom the
+  // map, since all candidates already fit in the frame from this one fit.
   useEffect(() => {
-    if (mapReady && mapRef.current && routeCoords && routeCoords.length > 0) {
+    if (mapReady && mapRef.current && candidates && candidates.length > 0) {
+      const allCoords = candidates.flatMap((c) => c.coords);
       const timer = setTimeout(() => {
-        mapRef.current?.fitToCoordinates(routeCoords, {
+        mapRef.current?.fitToCoordinates(allCoords, {
           edgePadding: { top: 60, right: 60, bottom: 60, left: 60 },
           animated: true,
         });
       }, 300);
       return () => clearTimeout(timer);
     }
-  }, [mapReady, routeCoords]);
+  }, [mapReady, candidates]);
 
   async function generateRoute() {
     setSessionState('generating');
-    setRouteCoords(null);
+    setCandidates(null);
+    setSelectedCandidateIndex(0);
     setLiveCoord(null);
     setDeviationDistance(null);
     try {
@@ -262,7 +304,7 @@ export default function App() {
 
       const response = await fetch(`${API_BASE_URL}/route`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
         body: JSON.stringify({ lat: latitude, lon: longitude, distance: TARGET_DISTANCE_M }),
       });
       const body = await response.json();
@@ -270,11 +312,21 @@ export default function App() {
         throw new Error(body.error || `route_api returned ${response.status}`);
       }
 
-      // Server already sorts candidates best-first (§5 point 4) -- take rank 1.
-      const best = body.features[0];
-      const coords = best.geometry.coordinates.map(([lon, lat]) => ({
-        latitude: lat,
-        longitude: lon,
+      // Server already sorts candidates best-first (§5 point 4, "return 2-3
+      // alternatives") -- keep all of them, not just rank 1, so the user can
+      // see and pick between them (see the render below). Rank 1 (index 0)
+      // stays selected by default.
+      const features = body.features || [];
+      if (features.length === 0) {
+        throw new Error('No route found');
+      }
+      const newCandidates = features.map((f) => ({
+        rank: f.properties.rank,
+        distanceM: f.properties.actual_distance_m,
+        coords: f.geometry.coordinates.map(([lon, lat]) => ({
+          latitude: lat,
+          longitude: lon,
+        })),
       }));
 
       setStartCoord({ latitude, longitude });
@@ -286,7 +338,8 @@ export default function App() {
       });
       // Set after initialRegion so the fitToCoordinates effect above only
       // fires once the MapView (mounted by initialRegion) actually exists.
-      setRouteCoords(coords);
+      setCandidates(newCandidates);
+      setSelectedCandidateIndex(0);
       setSessionState('ready');
     } catch (err) {
       Alert.alert('Could not generate route', String(err.message || err));
@@ -311,7 +364,7 @@ export default function App() {
       // Full trace, for run history -- every point, not just the latest.
       traceRef.current.push({ ...coord, timestamp: position.timestamp });
       setLiveCoord(coord);
-      setDeviationDistance(distanceToRouteMeters(coord, routeCoords));
+      setDeviationDistance(distanceToRouteMeters(coord, selectedCoords));
     });
   }
 
@@ -389,7 +442,7 @@ export default function App() {
       }
       const response = await fetch(`${API_BASE_URL}/closures`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
         body: JSON.stringify({ lat: coord.latitude, lon: coord.longitude }),
       });
       const body = await response.json();
@@ -422,7 +475,8 @@ export default function App() {
   }
 
   function handleReset() {
-    setRouteCoords(null);
+    setCandidates(null);
+    setSelectedCandidateIndex(0);
     setStartCoord(null);
     setLiveCoord(null);
     setDeviationDistance(null);
@@ -477,8 +531,40 @@ export default function App() {
       {initialRegion ? (
         <MapView ref={mapRef} style={styles.map} initialRegion={initialRegion} onMapReady={() => setMapReady(true)}>
           {startCoord && <Marker coordinate={startCoord} title="Start" pinColor="red" />}
-          {routeCoords && (
-            <Polyline coordinates={routeCoords} strokeColor="#2E7D32" strokeWidth={4} />
+          {/* Only offer a choice while still deciding ('ready') -- once a run
+              is underway (or done), the choice is locked in and this just
+              renders the one selected route, same as before this feature. */}
+          {sessionState === 'ready' && candidates ? (
+            <>
+              {/* Unselected alternates first, in a muted color, each tappable
+                  to select it. Rendered before the selected one so the
+                  selected route's green line draws on top and stays fully
+                  visible even where routes overlap. */}
+              {candidates.map((c, i) => i !== selectedCandidateIndex && (
+                <Polyline
+                  key={c.rank}
+                  coordinates={c.coords}
+                  strokeColor="#9E9E9E"
+                  strokeWidth={3}
+                  tappable
+                  onPress={() => setSelectedCandidateIndex(i)}
+                />
+              ))}
+              {selectedCandidate && (
+                <Polyline
+                  key={`selected-${selectedCandidate.rank}`}
+                  coordinates={selectedCandidate.coords}
+                  strokeColor="#2E7D32"
+                  strokeWidth={5}
+                  tappable
+                  onPress={() => {}}
+                />
+              )}
+            </>
+          ) : (
+            selectedCoords && (
+              <Polyline coordinates={selectedCoords} strokeColor="#2E7D32" strokeWidth={4} />
+            )
           )}
           {isTracking && liveCoord && (
             <Marker coordinate={liveCoord} title="You" pinColor={isDeviated ? 'orange' : 'dodgerblue'} />
@@ -506,10 +592,18 @@ export default function App() {
           <Button title="Generate 5km route from here" onPress={generateRoute} />
         )}
         {sessionState === 'ready' && (
-          <View style={styles.buttonRow}>
-            <Button title="Regenerate" onPress={generateRoute} />
-            <Button title="Start Run" onPress={handleStart} />
-          </View>
+          <>
+            {candidates && candidates.length > 1 && (
+              <Text style={styles.candidateHint}>
+                {candidates.length} routes shown -- tap one on the map to choose it.{' '}
+                Selected: #{selectedCandidate.rank} ({formatDistance(selectedCandidate.distanceM)})
+              </Text>
+            )}
+            <View style={styles.buttonRow}>
+              <Button title="Regenerate" onPress={generateRoute} />
+              <Button title="Start Run" onPress={handleStart} />
+            </View>
+          </>
         )}
         {sessionState === 'running' && (
           <View style={styles.buttonRow}>
@@ -573,6 +667,12 @@ const styles = StyleSheet.create({
   buttonRow: {
     flexDirection: 'row',
     justifyContent: 'space-evenly',
+  },
+  candidateHint: {
+    textAlign: 'center',
+    fontSize: 13,
+    color: '#555',
+    marginBottom: 10,
   },
   reportRow: {
     marginTop: 8,
