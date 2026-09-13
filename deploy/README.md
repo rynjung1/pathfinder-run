@@ -12,7 +12,6 @@ reference, so step 4 is "follow this," not "figure this out."
 /opt/pathfinder-run/venv/     # python3 -m venv venv; pip install -r scripts/requirements.txt
 /opt/pathfinder-run/scripts/.env      # real secrets -- copy from scripts/.env.example, fill in
 /opt/pathfinder-run/graphhopper/graph-cache-ontario/    # NOT built on the VPS -- see below
-/opt/pathfinder-run/data/greenspace-ontario/            # NOT built on the VPS -- see below
 ```
 
 Runs as a dedicated non-root user (`pathfinder` in the unit files --
@@ -21,23 +20,27 @@ and not your own login user.
 
 ## Don't build the graph on the VPS
 
-The feasibility review found the full-Ontario import needs ~4GB peak
-memory and ~8 minutes with the real greenspace data loaded -- fine on a
-dev machine, wasteful to provision a small production VPS around a
-one-time cost it only pays during a rebuild. Build locally (as this whole
-project has done throughout), then ship the result:
+The full-Ontario import takes a few minutes and modest peak memory --
+fine on a dev machine, wasteful to provision a small production VPS
+around a one-time cost it only pays during a rebuild. Build locally (as
+this whole project has done throughout), then ship the result:
 
 ```
 rsync -avz graphhopper/graph-cache-ontario/ vps:/opt/pathfinder-run/graphhopper/graph-cache-ontario/
-rsync -avz data/greenspace-ontario/ vps:/opt/pathfinder-run/data/greenspace-ontario/
 ```
 
 `graphhopper-web.jar`, `pathfinder_foot.json`, `config-ontario.yml`,
 `data/long_ways_ontario.json`, and `data/boundaries/ontario.geojson` are
 all in the repo already (`long_ways_ontario.json` and `ontario.geojson`
-are small and git-tracked; `graph-cache-ontario/` and
-`greenspace-ontario/` are gitignored precisely because of their size --
-that's what the rsync above is for).
+are small and git-tracked; `graph-cache-ontario/` is gitignored precisely
+because of its size -- that's what the rsync above is for).
+
+(`data/greenspace-ontario/` and the greenness routing rule it fed are no
+longer part of the pipeline -- removed at province scale as the confirmed
+root cause of /route being unusably slow in flexible mode. See
+pathfinder_foot.json's and config-ontario.yml's comments. Nothing to ship
+for it currently; that data stays local, unused, pending the future
+Java-side fix.)
 
 ## Install steps (once a domain is sorted and step 4 resumes)
 
@@ -45,8 +48,7 @@ that's what the rsync above is for).
 2. `python3 -m venv venv && venv/bin/pip install -r scripts/requirements.txt`
 3. `cp scripts/.env.example scripts/.env`, fill in a real
    `PATHFINDER_API_KEY` (`python3 -c "import secrets; print(secrets.token_urlsafe(32))"`).
-4. rsync the graph-cache and greenspace data (above) instead of importing
-   on-box.
+4. rsync the graph-cache (above) instead of importing on-box.
 5. `sudo cp deploy/pathfinder-*.service /etc/systemd/system/ && sudo systemctl daemon-reload`
 6. `sudo systemctl enable --now pathfinder-graphhopper`, wait for it to
    report healthy (`curl localhost:8995/health`) before starting the API.

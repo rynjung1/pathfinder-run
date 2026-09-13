@@ -1,51 +1,48 @@
 // Pathfinder Run custom pedestrian model.
 //
-// Implements the static path-type weighting AND greenness/park-proximity
-// boost from docs/running-app-architecture.md §5, point 1's first two
-// bullets: prefer dedicated pedestrian infrastructure, penalize (not
-// exclude) unprotected major roads, exclude anything without foot access,
-// and prefer edges inside a park/green-space polygon.
+// Implements the static path-type weighting from
+// docs/running-app-architecture.md §5, point 1's first bullet: prefer
+// dedicated pedestrian infrastructure, penalize (not exclude) unprotected
+// major roads, exclude anything without foot access.
 //
 // Deliberately NOT included here (separate, later work):
 // - Edge-reuse penalty (app-level logic in the route generator, not a
 //   GraphHopper profile concern)
 // - The live closures penalty (per-request only -- see generate_loop.py's
 //   fetch_return_leg/fetch_outbound_leg -- because it changes request to
-//   request, unlike greenness, which is permanent once the graph is built)
+//   request)
 //
-// Greenness (`in_greenspace`): sourced from data/greenspace/greenspace.geojson
-// (built by scripts/build_greenspace.py from this extract's leisure=park,
-// natural=wood, landuse=forest, leisure=nature_reserve,
-// landuse=recreation_ground, and leisure=garden ways/relations -- checked
-// against this specific extract, not assumed: 774 leisure=park ways alone,
-// including real named parks like Waterloo Park). Loaded via config.yml's
-// `custom_areas.directory`, GraphHopper's STATIC per-import mechanism, not
-// the per-request `areas` used for closures/long-way buffering -- greenness
-// is a permanent routing preference (the doc lists it alongside path-type
-// weighting as an edge-weight factor, §5 point 1, not a per-candidate
-// scoring term, §5 point 3), so it belongs baked into the graph, not
-// evaluated per request. Confirmed empirically against the running server
-// that this is fully CH/speed-mode compatible -- a plain GET with no
-// ch.disable logged `dijkstrabi|ch-routing`, not a flexible-mode fallback --
-// unlike every other custom_model mechanism built so far, which all require
-// ch.disable because they're per-request.
+// Greenness/park-proximity (§5 point 1's second bullet) is REMOVED as of
+// the full-Ontario migration, not just never-added -- it was here as an
+// `in_greenspace` rule (see git history for the exact form and its
+// verification) sourced from data/greenspace/greenspace.geojson via
+// config.yml's `custom_areas.directory`, GraphHopper's STATIC per-import
+// mechanism. That worked fine at city scale (Waterloo Region, Guelph) and
+// was even confirmed CH/speed-mode compatible there. At province scale it
+// is the confirmed root cause of /route being unusably slow in flexible
+// mode (ch.disable=true, required by every per-request custom_model
+// mechanism this app uses: edge-reuse, closures, the long-way buffer fix):
+// `in_greenspace` is a live per-edge point-in-polygon lookup against
+// 315,762 greenspace polygons, evaluated for every edge weight computation
+// flexible mode has to make without CH's precomputed shortcuts to fall
+// back on. Disambiguated directly, not inferred: an identical test query
+// against a scratch Ontario graph with this exact rule stripped out
+// completed in 49ms with LM prep enabled, versus 22-56s for the same query
+// against the real graph with it in place -- everything else held equal.
 //
-// 1.3x is a deliberately modest boost, chosen to protect against a primary/
-// secondary road that happens to pass through or border a park getting
-// boosted into out-competing a plain sidewalk/footway elsewhere. Verified
-// on a real case in this extract, not just the arithmetic in the abstract:
-// Westmount Road North (a real SECONDARY road, way 38896608) crosses a
-// greenspace polygon for part of its length. Isolated each road/greenness
-// combination via a real request confined to a single way (weight/distance
-// ratio, lower = cheaper):
-//   FOOTWAY, not in greenspace (baseline):      0.480
-//   SECONDARY, not in greenspace:                2.400  (0.480/2.400 = 1/5,
-//                                                 exactly matches 1.5/0.3)
-//   SECONDARY, IN greenspace (Westmount Rd N):   1.864  (2.400/1.864 = 1.287,
-//                                                 matches the 1.3x boost)
-// The boosted secondary road (1.864) is still ~3.9x MORE expensive than a
-// plain footway elsewhere (0.480) -- confirms the road-class tier keeps
-// dominating regardless of greenness, exactly as intended.
+// A proper fix would bake an in_greenspace-equivalent value into the graph
+// as a static encoded value at import time (so it costs nothing per query,
+// the same way road_class/surface/etc. do today), which requires a custom
+// Java TagParser + GraphHopper ImportRegistry extension -- confirmed via
+// decompiling the stock graphhopper-web.jar that no config-level or
+// OSM-tag-preprocessing path can do this (GraphHopper's encoded-value
+// registry is a fixed, closed set of ~50 hardcoded names, no generic
+// tag-to-encoded-value mechanism exists). Filed as a future item, not
+// blocking: multi-day Java build-out (new build toolchain, new custom
+// Application entry point, a spatial-indexed preprocessing pass), not
+// something to do incidentally here. scripts/build_greenspace.py and
+// data/greenspace-ontario/ are left in place, unused, for whenever that
+// work happens -- the polygon data itself doesn't need rebuilding.
 //
 // Note: this replaces the stock model's `multiply_by: foot_priority` rather than
 // layering on top of it. GraphHopper's built-in `foot_priority` (FootPriorityParser)
@@ -65,8 +62,7 @@
     { "if": "!foot_access", "multiply_by": "0" },
     { "if": "road_class == PATH || road_class == FOOTWAY || road_class == PEDESTRIAN || road_class == LIVING_STREET", "multiply_by": "1.5" },
     { "else_if": "road_class == PRIMARY || road_class == SECONDARY", "multiply_by": "0.3" },
-    { "else_if": "road_class == TRUNK || road_class == MOTORWAY", "multiply_by": "0.1" },
-    { "if": "in_greenspace", "multiply_by": "1.3" }
+    { "else_if": "road_class == TRUNK || road_class == MOTORWAY", "multiply_by": "0.1" }
   ],
   "speed": [
     { "if": "true", "limit_to": "foot_average_speed" }

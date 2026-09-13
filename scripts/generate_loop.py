@@ -653,14 +653,18 @@ def score_candidate(candidate, target_distance, compactness_weight=DEFAULT_COMPA
     docs/running-app-architecture.md §0/§7) show it needs adjusting.
 
     Greenness/park-proximity (§5 point 1's second bullet) is NOT a term
-    here -- it's baked into pathfinder_foot.json's routing cost instead
-    (an `in_greenspace` priority multiplier), so it already shapes which
-    candidates get found in the first place, rather than re-ranking
-    candidates after the fact. See that file's comments for the
-    reasoning. §5 point 3's separate "path-type score (sidewalk/park path
-    percentage)" criterion is still not a distinct scoring term here --
-    the same routing-cost-level path-type weighting already does the
-    equivalent job for candidate generation.
+    here. It used to be baked into pathfinder_foot.json's routing cost (an
+    `in_greenspace` priority multiplier) instead of being a scoring term,
+    but that rule has since been removed at province scale -- it was the
+    confirmed root cause of /route being unusably slow in flexible mode
+    (see pathfinder_foot.json's and config-ontario.yml's comments). A
+    proper fix is filed as a future item (a static encoded value baked in
+    at import time via a custom Java TagParser); until then, greenness is
+    simply not represented anywhere in route generation, not here and not
+    in the routing cost. §5 point 3's separate "path-type score
+    (sidewalk/park path percentage)" criterion is still not a distinct
+    scoring term here -- the routing-cost-level path-type weighting still
+    does the equivalent job for candidate generation, greenness aside.
     """
     distance_error_pct = 100 * abs(candidate["total_distance"] - target_distance) / target_distance
     reuse_pct = 100 * len(candidate["reused"]) / len(candidate["outbound_ways"]) if candidate["outbound_ways"] else 0

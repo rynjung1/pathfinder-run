@@ -10,11 +10,17 @@ graphhopper:
   # Feasibility investigated before building this for real: a scratch
   # import (no greenness) took ~62s/2.5GB peak/322MB graph-cache; adding
   # the real 736MB province-wide greenspace.geojson (in_greenspace, via
-  # custom_areas.directory below) raised that to ~479s/4.33GB peak, same
-  # 322MB graph-cache -- a real, one-time, ~130x-slower subnetwork-marking
-  # cost concentrated at import time, but CH speed mode still engages
-  # correctly for queries afterward and results are unaffected. Accepted
-  # as a one-time rebuild cost, not a per-request one.
+  # custom_areas.directory) raised that to ~479s/4.33GB peak, same 322MB
+  # graph-cache -- a real, one-time, ~130x-slower subnetwork-marking cost
+  # concentrated at import time. CH speed mode was unaffected by this, but
+  # per-request flexible mode (ch.disable=true, required by every
+  # per-request custom_model mechanism: edge-reuse, closures, the long-way
+  # buffer fix) turned out NOT to be -- in_greenspace made /route itself
+  # unusably slow at province scale (confirmed via a disambiguating LM
+  # test: 49ms vs 22-56s for an identical query with it removed), so
+  # greenness/park-proximity was removed from pathfinder_foot.json and
+  # custom_areas.directory below with it. See that file's comments for the
+  # full writeup and the future-item fix.
   #
   # OpenStreetMap input file PBF or XML, can be changed via command line -Ddw.graphhopper.datareader.file=some.pbf
   datareader.file: ../data/raw/ontario-260910.osm.pbf
@@ -184,7 +190,19 @@ graphhopper:
 
   # The maximum time in milliseconds after which a routing request will be aborted. This has some routing algorithm
   # specific caveats, but generally it should allow the prevention of long-running requests. The default is Long.MAX_VALUE
-  # routing.timeout_ms: 300000
+  #
+  # Set after finding the hard way (§4/§7 hardening review) that a flexible-
+  # mode (ch.disable=true) query -- required by every per-request
+  # custom_model this app uses (edge-reuse, closures, the long-way buffer
+  # fix) -- can take 30-90+ seconds on this graph's scale with no server-
+  # side cap at all, and that an abandoned search doesn't get cancelled
+  # when the client gives up: repeated slow queries left the worker pool
+  # backed up badly enough that even /health took ~50s to respond. 5000ms
+  # is a deliberately tight bound: if a query can't complete in a few
+  # seconds it should fail fast and free the worker, not linger -- the
+  # right behavior regardless of how (or whether) the underlying slowness
+  # itself gets fixed.
+  routing.timeout_ms: 5000
 
   # Control how many active landmarks are picked per default, this can improve query performance
   # routing.lm.active_landmarks: 4
@@ -215,13 +233,18 @@ graphhopper:
   # GraphHopper reads GeoJSON polygon files including their properties from this directory and makes them available
   # to all tag parsers and custom models. All GeoJSON Features require to have the "id" property.
   # Country borders are included automatically (see countries.geojson).
-  # Greenness/park-proximity boost, §5 point 1's second bullet -- see
-  # pathfinder_foot.json's `in_greenspace` rule. Built by
-  # scripts/build_greenspace.py from this extract's own OSM data (not
-  # committed to data/ directly -- see that script's comments on why a
-  # dedicated subdirectory, not data/ itself, avoids a real collision with
-  # data/boundaries/region-of-waterloo.geojson, which has no "id" property).
-  custom_areas.directory: ../data/greenspace-ontario
+  #
+  # custom_areas.directory used to point at ../data/greenspace-ontario for
+  # the greenness/park-proximity boost (§5 point 1's second bullet, an
+  # `in_greenspace` rule in pathfinder_foot.json). Removed at province
+  # scale: it's a live per-edge point-in-polygon lookup against 315,762
+  # polygons, confirmed (via a disambiguating LM test with it stripped out:
+  # 49ms vs 22-56s for an identical query) to be the root cause of /route
+  # being unusably slow in flexible mode. See pathfinder_foot.json's
+  # comments for the full writeup and the future-item fix (a static
+  # encoded value baked in at import time via a custom Java TagParser).
+  # data/greenspace-ontario/ and scripts/build_greenspace.py are left in
+  # place, unused, for that future work.
 
 
   #### Country Rules ####

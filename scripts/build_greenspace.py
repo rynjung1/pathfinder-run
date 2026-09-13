@@ -29,6 +29,15 @@ handling across thousands of individual park features.
 
 Usage:
     python3 scripts/build_greenspace.py
+
+Currently UNUSED at runtime: the in_greenspace routing rule this feeds
+(pathfinder_foot.json, loaded via config-ontario.yml's
+custom_areas.directory) was removed at province scale -- confirmed root
+cause of /route being unusably slow in flexible mode. See that file's and
+config-ontario.yml's comments. Left in place, and its output
+(data/greenspace-ontario/) left in place too, for the future fix (a
+static encoded value baked in at import time via a custom Java
+TagParser) -- the polygon extraction itself doesn't need redoing.
 """
 import argparse
 import json
