@@ -1,0 +1,41 @@
+# systemd unit for route_api.py's production entrypoint (scripts/serve.py,
+# waitress) -- pre-deployment hardening, step 3. Template: paths, user,
+# and group below assume the layout described in deploy/README.md;
+# adjust to match wherever this actually gets checked out on the VPS.
+#
+# Install:
+#   sudo cp deploy/pathfinder-route-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pathfinder-route-api
+#
+# Logs: journalctl -u pathfinder-route-api -f
+
+[Unit]
+Description=Pathfinder Run route API (waitress, behind a reverse proxy)
+# Wants/After graphhopper.service: route_api.py calls out to GraphHopper
+# on every /route and /closures request -- starting before it exists is
+# harmless (requests just 502 until it's up) but there's no reason to
+# race it.
+Wants=pathfinder-graphhopper.service
+After=network.target pathfinder-graphhopper.service
+
+[Service]
+Type=simple
+User=pathfinder
+Group=pathfinder
+WorkingDirectory=/opt/pathfinder-run/scripts
+EnvironmentFile=/opt/pathfinder-run/scripts/.env
+ExecStart=/opt/pathfinder-run/venv/bin/python3 serve.py
+Restart=on-failure
+RestartSec=5
+
+# Defense in depth beyond "bind to 127.0.0.1" -- costs nothing, this
+# process has no legitimate reason to touch anything outside its own
+# working directory and the SQLite file it manages there.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/pathfinder-run/scripts
+
+[Install]
+WantedBy=multi-user.target

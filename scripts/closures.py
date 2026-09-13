@@ -72,6 +72,7 @@ matching." The reported position exists only transiently, inside
 snap_to_way_id, long enough to resolve a way_id; it is never written to
 disk.
 """
+import secrets
 import sqlite3
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -84,8 +85,22 @@ DEFAULT_CLOSURE_MAX_AGE_DAYS = 7  # ad hoc, revisit -- see module docstring
 
 
 def ensure_schema(db_path=DEFAULT_DB_PATH):
-    """Create the closures table/indexes if they don't exist. Idempotent --
-    safe to call on every server startup."""
+    """Create the closures table/indexes if they don't exist, and migrate
+    older databases forward. Idempotent -- safe to call on every server
+    startup.
+
+    resolve_token (added for the pre-deployment hardening pass, §4/§7):
+    PATCH /closures/<id> originally had no ownership check at all -- any
+    caller could resolve any report by walking sequential ids. Rather than
+    building real user accounts (out of scope for a small beta), each
+    report gets its own random, unguessable token at creation time
+    (store_closure, below); resolving requires presenting that exact
+    token back. An existing database from before this column existed gets
+    it added via ALTER TABLE, defaulting to NULL for old rows -- those
+    rows simply can't be resolved via a token anymore (there was never a
+    token issued for them to prove), which is the correct, safe default,
+    not a bug: nothing legitimate should already be holding a token for a
+    report the schema never generated one for."""
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
@@ -94,10 +109,14 @@ def ensure_schema(db_path=DEFAULT_DB_PATH):
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 osm_way_id INTEGER NOT NULL,
                 reported_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active'
+                status TEXT NOT NULL DEFAULT 'active',
+                resolve_token TEXT
             )
             """
         )
+        existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(closures)").fetchall()}
+        if "resolve_token" not in existing_columns:
+            conn.execute("ALTER TABLE closures ADD COLUMN resolve_token TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_closures_way_id ON closures(osm_way_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_closures_reported_at ON closures(reported_at)")
         conn.commit()
@@ -109,16 +128,25 @@ def store_closure(osm_way_id, db_path=DEFAULT_DB_PATH):
     """Insert one closure report. Opens and closes its own connection rather
     than sharing a long-lived one -- avoids any assumption about Flask's dev
     server being single-threaded, at the cost of a trivial per-request file
-    open. Returns the new row's id."""
+    open.
+
+    Generates a random resolve_token (secrets.token_urlsafe -- 24 bytes,
+    not guessable by brute force) and returns it alongside the new row's
+    id: (closure_id, resolve_token). The caller (route_api.py) hands the
+    token back to whoever reported the closure; resolve_closure() requires
+    it later. Returned once, at creation -- not retrievable afterward by
+    id alone, on purpose (that's the whole point: knowing the id shouldn't
+    be enough)."""
     reported_at = datetime.now(timezone.utc).isoformat()
+    resolve_token = secrets.token_urlsafe(24)
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.execute(
-            "INSERT INTO closures (osm_way_id, reported_at, status) VALUES (?, ?, 'active')",
-            (osm_way_id, reported_at),
+            "INSERT INTO closures (osm_way_id, reported_at, status, resolve_token) VALUES (?, ?, 'active', ?)",
+            (osm_way_id, reported_at, resolve_token),
         )
         conn.commit()
-        return cur.lastrowid
+        return cur.lastrowid, resolve_token
     finally:
         conn.close()
 
@@ -181,26 +209,45 @@ def get_active_closure_way_ids(db_path=DEFAULT_DB_PATH):
         conn.close()
 
 
-def resolve_closure(closure_id, db_path=DEFAULT_DB_PATH):
+def resolve_closure(closure_id, resolve_token, db_path=DEFAULT_DB_PATH):
     """Mark one closure report resolved -- the basic clear mechanism that
     was missing when closures were first wired into routing (see module
-    docstring). Deliberately simple: an explicit "this has been resolved"
-    by id, not time-based decay/expiry, and not scoped to a way_id (a way
-    can have multiple independent reports; this resolves the one report,
-    not "everything on this way").
+    docstring), now requiring the token issued at creation (see
+    store_closure) rather than just the id -- ids are sequential and
+    trivially guessable, the token isn't. Not time-based decay/expiry, and
+    not scoped to a way_id (a way can have multiple independent reports;
+    this resolves the one report, not "everything on this way").
 
-    Returns True if a row with this id existed and was updated, False if
-    no such id exists. Idempotent otherwise -- resolving an
-    already-resolved row is a no-op that still returns True, since the
-    row does exist and ends up in the desired state either way."""
+    Returns one of three strings, not a bool -- the caller (route_api.py)
+    needs to tell "doesn't exist" (404) apart from "exists, wrong token"
+    (403), not collapse both into one failure case:
+      "resolved"       -- updated (or already resolved with this same
+                           correct token -- idempotent).
+      "not_found"       -- no row with this id.
+      "invalid_token"   -- the row exists but resolve_token doesn't match
+                           (including rows from before this column
+                           existed, where it's NULL -- compare_digest
+                           against a real token never matches NULL).
+    Uses secrets.compare_digest for the comparison -- a plain == is
+    vulnerable to a timing attack that could let an attacker recover the
+    token byte-by-byte from response-time differences; compare_digest
+    runs in constant time regardless of where the strings first differ."""
     conn = sqlite3.connect(db_path)
     try:
-        cur = conn.execute(
+        row = conn.execute(
+            "SELECT resolve_token FROM closures WHERE id = ?", (closure_id,)
+        ).fetchone()
+        if row is None:
+            return "not_found"
+        stored_token = row[0]
+        if not stored_token or not isinstance(resolve_token, str) or not secrets.compare_digest(stored_token, resolve_token):
+            return "invalid_token"
+        conn.execute(
             "UPDATE closures SET status = 'resolved' WHERE id = ?",
             (closure_id,),
         )
         conn.commit()
-        return cur.rowcount > 0
+        return "resolved"
     finally:
         conn.close()
 

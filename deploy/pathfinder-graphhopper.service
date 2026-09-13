@@ -1,0 +1,51 @@
+# systemd unit for the GraphHopper instance itself. NOT explicitly asked
+# for in the "swap the Flask dev server for waitress/gunicorn under
+# systemd" hardening step -- added alongside it because without this,
+# route_api.py being supervised doesn't actually buy much: if GraphHopper
+# crashes or the box reboots, nothing restarts it and every /route and
+# /closures request just silently 502s until someone notices and runs
+# run-graphhopper.sh by hand. Flagging this as an addition, not hiding it.
+#
+# Uses `java` directly, not run-graphhopper.sh -- that script's multi-path
+# JDK detection (Library/Java vs. Homebrew) exists for this local macOS
+# dev machine specifically; a VPS with a single OS-installed JDK 17
+# (e.g. `apt install openjdk-17-jdk` on Debian/Ubuntu) just needs `java`
+# on PATH, no detection dance required. -Xmx10g carries over unchanged --
+# see run-graphhopper.sh's own comment for why (this machine's finding
+# that the default ~4GB ergonomic heap OOMs partway through an import
+# with the real greenspace data loaded; matters again on the VPS the
+# next time the graph is rebuilt there, if it ever is -- see the
+# feasibility review's recommendation to build off-box and rsync the
+# result instead).
+#
+# Install:
+#   sudo cp deploy/pathfinder-graphhopper.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pathfinder-graphhopper
+#
+# Logs: journalctl -u pathfinder-graphhopper -f (also graphhopper/logs/graphhopper-ontario.log)
+
+[Unit]
+Description=Pathfinder Run GraphHopper (full-Ontario instance)
+After=network.target
+
+[Service]
+Type=simple
+User=pathfinder
+Group=pathfinder
+WorkingDirectory=/opt/pathfinder-run/graphhopper
+ExecStart=/usr/bin/java -Xmx10g -jar graphhopper-web.jar server config-ontario.yml
+Restart=on-failure
+RestartSec=5
+# Import + CH prep can take several minutes on first start (or after a
+# graph-cache rebuild) -- give systemd more patience than its 90s default
+# before it decides the service failed to start.
+TimeoutStartSec=900
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/pathfinder-run/graphhopper
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,8 @@
 # Secrets / environment
 .env
 .env.*
+# ...except a committed template with placeholder values, not real secrets
+!.env.example
 *.pem
 *.key
 secrets/

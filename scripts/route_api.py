@@ -4,11 +4,19 @@ Pathfinder Run -- v1 mobile client backbone, §7 step 3.
 
 A minimal HTTP wrapper around generate_loop.py's candidate generation, so a
 mobile client has something to call over the network instead of shelling
-out to the CLI script. Deliberately NOT the API gateway from §4 -- no auth,
-no rate limiting, no persistence, no request logging beyond Flask's default.
-Just enough for the React Native side to request a route and get GeoJSON
-back. Auth/rate-limiting/etc. are real requirements before this is anything
-but a local dev server -- not addressed here.
+out to the CLI script. Still deliberately NOT the full API gateway from
+§4 -- no user accounts, no persistence beyond closures.db, no request
+logging beyond the WSGI server's default -- but as of the pre-deployment
+hardening pass, no longer wide open either: a static shared API key
+(require_api_key), per-IP rate limits (flask-limiter), input caps on
+/route, and per-report resolve tokens on /closures are all real now. See
+that hardening review's own notes for what's covered and what's
+explicitly still deferred (real user accounts, per-city closure
+filtering, etc.).
+
+All endpoints below except /health require an `X-API-Key` header
+matching the PATHFINDER_API_KEY environment variable (see .env.example).
+Requests are also rate-limited per source IP.
 
 Coverage (§0's "expand to additional cities"): fronts one GraphHopper
 instance covering the full province of Ontario (cities.py) -- this
@@ -23,43 +31,67 @@ still runs on every request -- a location outside Ontario gets a plain
 region; this was true before Guelph existed and stays true now.
 
 Endpoints:
-    POST /route
+    POST /route  (rate limit: 30/min per IP)
     body: {"lat": 43.4643, "lon": -80.5204, "distance": 5000}
-    optional: "bearing" (default 0), "candidates" (default 6),
-              "top_n" (default 3), "profile" (default "foot")
+    optional: "bearing" (default 0), "candidates" (default 6, max 12),
+              "top_n" (default 3, max 10), "profile" (default "foot")
     -> 200: GeoJSON FeatureCollection of the top-scoring candidates
              (candidates_to_geojson from generate_loop.py)
-    -> 400: missing/invalid lat, lon, or distance
+    -> 400: missing/invalid lat, lon, or distance; distance over 30km;
+             candidates/top_n over their max
+    -> 401: missing/invalid X-API-Key
+    -> 429: rate limit exceeded
     -> 502: GraphHopper unreachable, or no candidate succeeded
 
-    POST /closures -- §6/§7 step 5. Wired into /route's routing cost as a
-    hard exclusion (see generate_loop.py's fetch_return_leg/fetch_outbound_leg
-    docstrings and closures.py's get_active_closure_way_ids) -- a route
-    request made after a closure report will avoid that way on both legs.
+    POST /closures  (rate limit: 20/min per IP) -- §6/§7 step 5. Wired
+    into /route's routing cost as a hard exclusion (see generate_loop.py's
+    fetch_return_leg/fetch_outbound_leg docstrings and closures.py's
+    get_active_closure_way_ids) -- a route request made after a closure
+    report will avoid that way on both legs.
     body: {"lat": 43.4643, "lon": -80.5204}
     optional: "profile" (default "foot")
-    -> 201: {"id", "osm_way_id", "status"} -- the stored report
+    -> 201: {"id", "osm_way_id", "status", "resolve_token"} -- the stored
+             report. resolve_token is returned ONCE, here -- hold onto it
+             to resolve this report later; there's no way to recover it
+             afterward by id alone (see closures.py's store_closure).
     -> 400: missing/invalid lat/lon, or no routable way near that point
+    -> 401: missing/invalid X-API-Key
+    -> 429: rate limit exceeded
     -> 502: GraphHopper unreachable
 
-    PATCH /closures/<id> -- mark one report resolved (basic clear
-    mechanism; no time-based decay/expiry yet -- see closures.py).
+    PATCH /closures/<id>  (rate limit: 20/min per IP) -- mark one report
+    resolved. Requires the resolve_token issued when that report was
+    created -- ids are sequential and guessable, the token isn't (basic
+    clear mechanism; no time-based decay/expiry yet -- see closures.py).
+    body: {"resolve_token": "..."}
     -> 200: {"id", "status": "resolved"}
+    -> 400: missing/invalid resolve_token in the body
+    -> 401: missing/invalid X-API-Key
+    -> 403: resolve_token doesn't match this closure
     -> 404: no closure with that id
+    -> 429: rate limit exceeded
 
 Usage:
     python3 scripts/route_api.py
     curl -X POST http://localhost:5001/route \
-        -H "Content-Type: application/json" \
+        -H "Content-Type: application/json" -H "X-API-Key: $PATHFINDER_API_KEY" \
         -d '{"lat": 43.4643, "lon": -80.5204, "distance": 5000}'
     curl -X POST http://localhost:5001/closures \
-        -H "Content-Type: application/json" \
+        -H "Content-Type: application/json" -H "X-API-Key: $PATHFINDER_API_KEY" \
         -d '{"lat": 43.4643, "lon": -80.5204}'
-    curl -X PATCH http://localhost:5001/closures/1
+    curl -X PATCH http://localhost:5001/closures/1 \
+        -H "Content-Type: application/json" -H "X-API-Key: $PATHFINDER_API_KEY" \
+        -d '{"resolve_token": "..."}'
 """
+import functools
+import os
+import secrets
 import sys
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from generate_loop import (
     DEFAULT_DISTANCE_TOLERANCE_PCT,
@@ -78,11 +110,79 @@ from closures import (
 )
 from cities import resolve_city
 
+# Pre-deployment hardening (§4/§7, "is this safe to expose on the public
+# internet" review) -- see that review's own notes for the reasoning
+# behind each piece below, not just the mechanics.
+
+load_dotenv()  # reads .env in this directory if present; a no-op if it's
+                # not (e.g. env vars set some other way, like systemd's
+                # EnvironmentFile) -- never overrides an already-set
+                # real environment variable.
+
+# Required, not optional with a silent bypass: an earlier draft of this
+# considered "skip the check if the env var isn't set" for local-dev
+# convenience, but that's exactly the kind of default that gets deployed
+# by accident with no auth at all. Fails at import time instead, loudly,
+# in every environment including local dev -- a .env with a real
+# (dev-only) key is the intended way to satisfy this locally, not a
+# bypass path.
+API_KEY = os.environ.get("PATHFINDER_API_KEY")
+if not API_KEY:
+    raise RuntimeError(
+        "PATHFINDER_API_KEY is not set. Set it in scripts/.env (see .env.example) "
+        "or in the real environment before starting route_api.py -- there is no "
+        "unauthenticated mode."
+    )
+
 app = Flask(__name__)
 ensure_schema()
 
+# In-memory storage is fine at this scale (a single-process small beta,
+# not a fleet behind a load balancer) -- see the hardening review. Limits
+# are ad hoc starting points, like this codebase's other tunables
+# (DEFAULT_REUSE_PENALTY_MULTIPLIER, DEFAULT_COMPACTNESS_WEIGHT, etc.):
+# generous enough for a real user tapping "regenerate" a few times, tight
+# enough to blunt casual scripted abuse. Revisit once real usage shows
+# whether they're too tight or too loose.
+limiter = Limiter(key_func=get_remote_address, app=app, storage_uri="memory://")
+
+# Input caps for /route -- see require_api_key's neighboring comment on
+# why these exist independent of rate limiting: a single oversized
+# request (e.g. distance=500000, candidates=10000) can tie up the server
+# without needing repeated requests at all. Ad hoc, like the rate limits
+# above -- 30km comfortably covers any real run distance this app is
+# meant for; 12 candidates is already more than generate_candidates' own
+# default (6) and more alternatives than §5 point 4 asks for (2-3).
+MAX_DISTANCE_M = 30000
+MAX_CANDIDATES = 12
+MAX_TOP_N = 10
+
+
+def require_api_key(view):
+    """A static shared key, not user auth -- deliberately not the full §4
+    gateway. Checked with secrets.compare_digest, not `==`: a plain
+    string comparison short-circuits at the first differing character,
+    which leaks (via response-time differences) how many leading
+    characters of a guess were correct; compare_digest runs in constant
+    time regardless.
+
+    Honest about its real limit (see the hardening review): a key baked
+    into a mobile app build is extractable by anyone who decompiles it --
+    this stops casual/automated abuse and drive-by scraping, not a
+    targeted attacker. That's the right bar for a small beta, not a
+    false promise of more."""
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        provided = request.headers.get("X-API-Key", "")
+        if not secrets.compare_digest(provided, API_KEY):
+            return jsonify({"error": "missing or invalid API key"}), 401
+        return view(*args, **kwargs)
+    return wrapped
+
 
 @app.route("/route", methods=["POST"])
+@limiter.limit("30 per minute")
+@require_api_key
 def route():
     body = request.get_json(silent=True) or {}
 
@@ -94,6 +194,8 @@ def route():
         return jsonify({"error": "lat, lon, and distance (meters) are required numeric fields"}), 400
     if distance <= 0:
         return jsonify({"error": "distance must be positive"}), 400
+    if distance > MAX_DISTANCE_M:
+        return jsonify({"error": f"distance must be at most {MAX_DISTANCE_M} meters"}), 400
 
     try:
         bearing = float(body.get("bearing", 0.0))
@@ -106,6 +208,16 @@ def route():
         return jsonify({"error": "profile must be a string"}), 400
     if num_candidates < 1 or top_n < 1:
         return jsonify({"error": "candidates and top_n must be at least 1"}), 400
+    # Uncapped, a single request could ask for thousands of candidates at
+    # an arbitrary distance -- each one is multiple GraphHopper round
+    # trips, so this is a single-request resource-exhaustion vector, not
+    # something rate limiting (which throttles request *volume*) protects
+    # against on its own. Found during the pre-deployment hardening
+    # review, fixed here rather than left for rate limiting to paper over.
+    if num_candidates > MAX_CANDIDATES:
+        return jsonify({"error": f"candidates must be at most {MAX_CANDIDATES}"}), 400
+    if top_n > MAX_TOP_N:
+        return jsonify({"error": f"top_n must be at most {MAX_TOP_N}"}), 400
 
     # Coverage check against Ontario's real boundary -- see cities.py's
     # module docstring for the history/reasoning. Not a client-supplied
@@ -145,6 +257,8 @@ def route():
 
 
 @app.route("/closures", methods=["POST"])
+@limiter.limit("20 per minute")
+@require_api_key
 def report_closure():
     body = request.get_json(silent=True) or {}
 
@@ -170,14 +284,36 @@ def report_closure():
     if way_id is None:
         return jsonify({"error": "no routable way found near the reported location"}), 400
 
-    closure_id = store_closure(way_id)
-    return jsonify({"id": closure_id, "osm_way_id": way_id, "status": "active"}), 201
+    closure_id, resolve_token = store_closure(way_id)
+    # resolve_token is returned exactly once, here -- the client (or
+    # whoever reported it) needs to hold onto it to resolve this specific
+    # report later. There's no way to recover it afterward by id alone;
+    # see closures.py's store_closure docstring for why that's the point.
+    return jsonify({"id": closure_id, "osm_way_id": way_id, "status": "active", "resolve_token": resolve_token}), 201
 
 
 @app.route("/closures/<int:closure_id>", methods=["PATCH"])
+@limiter.limit("20 per minute")
+@require_api_key
 def resolve_closure_route(closure_id):
-    if not resolve_closure(closure_id):
+    body = request.get_json(silent=True) or {}
+    resolve_token = body.get("resolve_token")
+    if not isinstance(resolve_token, str) or not resolve_token:
+        return jsonify({"error": "resolve_token (string) is required"}), 400
+
+    result = resolve_closure(closure_id, resolve_token)
+    if result == "not_found":
         return jsonify({"error": f"no closure with id {closure_id}"}), 404
+    if result == "invalid_token":
+        # 403, not 404: the id is real, the caller just can't prove they're
+        # allowed to resolve it. This does let a caller distinguish "id
+        # exists" from "id doesn't" by status code alone -- an accepted,
+        # low-value leak for a small beta (a closure id on its own isn't
+        # sensitive, unlike e.g. an account email in a login flow) traded
+        # for a response a legitimate integrator can actually debug
+        # against, rather than one indistinguishable failure for two very
+        # different problems.
+        return jsonify({"error": "invalid resolve_token for this closure"}), 403
     return jsonify({"id": closure_id, "status": "resolved"})
 
 
