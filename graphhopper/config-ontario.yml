@@ -1,11 +1,14 @@
 graphhopper:
 
   # Full-Ontario production instance -- supersedes the earlier per-city
-  # model (config.yml for Waterloo Region, config-guelph.yml for Guelph,
-  # both decommissioned once this was verified). One graph covering the
-  # whole province, replacing cities.py's per-city GraphHopper dispatch
-  # with a single URL plus a coverage check against Ontario's real
-  # boundary (data/boundaries/ontario.geojson) -- see cities.py.
+  # model. This file used to be config.yml (Waterloo Region only) before
+  # being renamed here; config-guelph.yml (a second, separate Guelph
+  # instance) existed alongside it and was deleted once this migration
+  # was verified -- neither file exists in the repo anymore. One graph
+  # now covers the whole province, replacing cities.py's per-city
+  # GraphHopper dispatch with a single URL plus a coverage check against
+  # Ontario's real boundary (data/boundaries/ontario.geojson) -- see
+  # cities.py.
   #
   # Feasibility investigated before building this for real: a scratch
   # import (no greenness) took ~62s/2.5GB peak/322MB graph-cache; adding
