@@ -1,21 +1,25 @@
-name: Python tests
+name: Tests
 
-# Every push and PR, per the current setup this repo has (scripts/tests/,
-# added alongside scripts/pytest.ini and scripts/requirements-dev.txt).
-# CI has no GraphHopper instance running -- test_route_regression.py's
-# live-server case is written to skip cleanly (not fail, not hang) when
-# it can't reach one, via a fast /health probe -- so no special
-# skip-handling is needed here: pytest itself exits 0 when everything
-# either passes or skips, nothing fails. Confirmed directly before
-# writing this workflow, not assumed: ran the suite in a clean venv with
-# only requirements-dev.txt installed and no GraphHopper reachable,
-# got 21 passed, 1 skipped, exit code 0.
+# Every push and PR. Two independent jobs, one per half of the stack --
+# see each job's own comment for what it covers and why it's safe to run
+# with nothing else provisioned (no GraphHopper instance, no native
+# mobile runtime).
 on:
   push:
   pull_request:
 
 jobs:
-  test:
+  python-test:
+    # scripts/tests/, added alongside scripts/pytest.ini and
+    # scripts/requirements-dev.txt. CI has no GraphHopper instance
+    # running -- test_route_regression.py's live-server case is written
+    # to skip cleanly (not fail, not hang) when it can't reach one, via a
+    # fast /health probe -- so no special skip-handling is needed here:
+    # pytest itself exits 0 when everything either passes or skips,
+    # nothing fails. Confirmed directly before writing this workflow, not
+    # assumed: ran the suite in a clean venv with only
+    # requirements-dev.txt installed and no GraphHopper reachable, got 21
+    # passed, 1 skipped, exit code 0.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -27,3 +31,21 @@ jobs:
           python-version: "3.10"  # matches this project's actual dev environment
       - run: pip install -r requirements-dev.txt
       - run: pytest
+
+  mobile-test:
+    # mobile/__tests__/, covering the pure functions in mobile/geometry.js
+    # (extracted out of App.js specifically so they're testable without a
+    # native runtime -- see geometry.js's own header). Nothing here needs
+    # a simulator/emulator or any Expo dev server; plain Jest against
+    # dependency-free logic, same category as the Python job above.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npx jest
