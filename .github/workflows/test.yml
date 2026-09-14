@@ -1,0 +1,29 @@
+name: Python tests
+
+# Every push and PR, per the current setup this repo has (scripts/tests/,
+# added alongside scripts/pytest.ini and scripts/requirements-dev.txt).
+# CI has no GraphHopper instance running -- test_route_regression.py's
+# live-server case is written to skip cleanly (not fail, not hang) when
+# it can't reach one, via a fast /health probe -- so no special
+# skip-handling is needed here: pytest itself exits 0 when everything
+# either passes or skips, nothing fails. Confirmed directly before
+# writing this workflow, not assumed: ran the suite in a clean venv with
+# only requirements-dev.txt installed and no GraphHopper reachable,
+# got 21 passed, 1 skipped, exit code 0.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"  # matches this project's actual dev environment
+      - run: pip install -r requirements-dev.txt
+      - run: pytest
