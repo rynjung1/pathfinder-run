@@ -63,6 +63,8 @@ npx expo start --ios   # or --android
 
 See `mobile/App.js`'s file header for the `API_BASE_URL` addressing notes (Simulator vs. physical device vs. Android emulator all need different values).
 
+`npm audit` reports 10 moderate-severity findings here — a known, accepted issue, not an unaddressed gap. All 10 trace to exactly one advisory ([GHSA-w5hq-g745-h8pq](https://github.com/advisories/GHSA-w5hq-g745-h8pq), a `uuid` buffer-bounds issue), reached only through Expo's own build-time tooling (`@expo/cli` → `@expo/config-plugins` → `xcode` → `uuid`) — code that runs on the dev machine during `expo start`/`expo prebuild`, never inside the JS bundle shipped to a device, so it's not reachable by any network input. The only fix `npm audit fix --force` offers is downgrading `expo` to `46.0.21` — an 11-major-version regression that would almost certainly break `expo-sqlite`/`expo-location`/`react-native-maps` compatibility — to patch build tooling that isn't exposed at runtime. Confirmed via `npm audit --json` that this really is one advisory propagated across 10 package entries, not 10 distinct issues. Not worth that cost for this risk; revisit if Expo ships a patched `uuid`/`xcode` without requiring the downgrade.
+
 ### Deploying for real
 
 Not done yet — see [`deploy/README.md`](deploy/README.md) for the concrete plan (systemd units, layout, what's blocked and on what).
