@@ -59,6 +59,20 @@ async function ensureRunUuidColumn(db) {
   }
 }
 
+// §2's "offline map tiles for the last route" -- see App.js's
+// captureRunSnapshot for the actual mechanism (a static MapView snapshot,
+// not real tile caching) and why. Just a file path (or NULL for runs saved
+// before this existed, or where the snapshot capture itself failed) --
+// same ALTER-TABLE-for-existing-installs pattern as run_uuid above, for
+// the same reason.
+async function ensureMapSnapshotUriColumn(db) {
+  const columns = await db.getAllAsync('PRAGMA table_info(runs)');
+  const hasColumn = columns.some((c) => c.name === 'map_snapshot_uri');
+  if (!hasColumn) {
+    await db.execAsync('ALTER TABLE runs ADD COLUMN map_snapshot_uri TEXT');
+  }
+}
+
 function getDb() {
   if (!dbPromise) {
     dbPromise = SQLite.openDatabaseAsync(DB_NAME).then(async (db) => {
@@ -77,6 +91,7 @@ function getDb() {
         );
       `);
       await ensureRunUuidColumn(db);
+      await ensureMapSnapshotUriColumn(db);
       return db;
     });
   }
@@ -114,16 +129,17 @@ export async function getOrCreateDeviceId() {
 // generate runUuid themselves (see App.js) before calling this, the same
 // value used for the server sync attempt right after -- both need to
 // agree on it for sync idempotency to mean anything.
-export async function saveRun({ startedAt, targetDistanceM, actualDistanceM, durationMs, trace, runUuid }) {
+export async function saveRun({ startedAt, targetDistanceM, actualDistanceM, durationMs, trace, runUuid, mapSnapshotUri }) {
   const db = await getDb();
   const result = await db.runAsync(
-    'INSERT INTO runs (started_at, target_distance_m, actual_distance_m, duration_ms, trace, run_uuid) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO runs (started_at, target_distance_m, actual_distance_m, duration_ms, trace, run_uuid, map_snapshot_uri) VALUES (?, ?, ?, ?, ?, ?, ?)',
     startedAt,
     targetDistanceM,
     actualDistanceM,
     durationMs,
     JSON.stringify(trace),
-    runUuid
+    runUuid,
+    mapSnapshotUri || null
   );
   return result.lastInsertRowId;
 }
@@ -142,6 +158,7 @@ export async function getRuns() {
     durationMs: row.duration_ms,
     trace: JSON.parse(row.trace),
     runUuid: row.run_uuid,
+    mapSnapshotUri: row.map_snapshot_uri,
   }));
 }
 

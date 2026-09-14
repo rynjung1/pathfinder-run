@@ -16,9 +16,17 @@
 const React = require('react');
 const { View } = require('react-native');
 
+// Module-scoped, not created fresh per mount, so a test can hold a
+// reference to it (MapView.__takeSnapshotMock) and assert on calls --
+// App.js's captureRunSnapshot calls mapRef.current.takeSnapshot(...)
+// directly (§2's offline-map-tiles substitution), same "not optionally
+// called" reasoning as fitToCoordinates above.
+const takeSnapshotMock = jest.fn(() => Promise.resolve('file:///tmp/mock-snapshot.png'));
+
 const MapView = React.forwardRef((props, ref) => {
   React.useImperativeHandle(ref, () => ({
     fitToCoordinates: () => {},
+    takeSnapshot: takeSnapshotMock,
   }));
   return React.createElement(View, { testID: 'mock-map-view' }, props.children);
 });
@@ -30,3 +38,4 @@ module.exports = MapView;
 module.exports.default = MapView;
 module.exports.Marker = Marker;
 module.exports.Polyline = Polyline;
+module.exports.__takeSnapshotMock = takeSnapshotMock;

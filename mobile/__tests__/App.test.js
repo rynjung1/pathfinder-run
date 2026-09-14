@@ -14,6 +14,7 @@
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { Alert } from 'react-native';
+import * as Location from 'expo-location';
 
 // Captured by the watchPositionAsync mock below so a test can simulate a
 // real GPS ping by calling it directly -- App.js's handleStart flow calls
@@ -34,6 +35,21 @@ jest.mock('expo-location', () => ({
   }),
 }));
 
+// Captured the same way, for the adaptive-sampling test -- jest-expo's
+// default mock for expo-sensors exists but never actually invokes a
+// registered listener, which would make the switching logic untestable
+// (and untested) rather than just untriggered in this environment.
+let accelerometerCallback = null;
+jest.mock('expo-sensors', () => ({
+  Accelerometer: {
+    setUpdateInterval: jest.fn(),
+    addListener: jest.fn((callback) => {
+      accelerometerCallback = callback;
+      return { remove: jest.fn() };
+    }),
+  },
+}));
+
 jest.mock('../db', () => ({
   getRuns: jest.fn(() => Promise.resolve([])),
   saveRun: jest.fn(() => Promise.resolve(1)),
@@ -41,8 +57,49 @@ jest.mock('../db', () => ({
   deleteAllRuns: jest.fn(() => Promise.resolve()),
 }));
 
+// Module-scoped mocks (not per-instance jest.fn()s) so tests can assert on
+// calls the same way __mocks__/react-native-maps.js's __takeSnapshotMock
+// does -- App.js's captureRunSnapshot/deleteAllData call File/Directory
+// instance methods it creates itself, so there's no other way to intercept
+// them. Good enough to stand in for real file paths: App.js only ever
+// treats a File/Directory's .uri as an opaque string it stores/reads back,
+// never parses it.
+jest.mock('expo-file-system', () => {
+  const copyMock = jest.fn(() => Promise.resolve());
+  const deleteMock = jest.fn();
+  const createMock = jest.fn();
+  class MockFile {
+    constructor(...parts) {
+      this.uri = parts.map((p) => (typeof p === 'string' ? p : p.uri)).join('/');
+    }
+    copy(dest) {
+      return copyMock(this, dest);
+    }
+    delete() {
+      return deleteMock(this);
+    }
+  }
+  class MockDirectory {
+    constructor(...parts) {
+      this.uri = parts.map((p) => (typeof p === 'string' ? p : p.uri)).join('/');
+    }
+    create(options) {
+      return createMock(this, options);
+    }
+  }
+  return {
+    Paths: { document: { uri: 'file:///mock-documents' } },
+    File: MockFile,
+    Directory: MockDirectory,
+    __copyMock: copyMock,
+    __deleteMock: deleteMock,
+  };
+});
+
 import App from '../App';
-import { deleteAllRuns } from '../db';
+import { deleteAllRuns, getRuns, saveRun } from '../db';
+import MapView from 'react-native-maps';
+import { __copyMock, __deleteMock } from 'expo-file-system';
 
 // Three distinct, real-shaped candidates, matching exactly what
 // route_api.py's candidates_to_geojson actually returns (see App.js's
@@ -155,4 +212,112 @@ test('starting a run shows a live Recording indicator that updates as GPS points
   // same accumulated distance -- doesn't reset to 0.
   fireEvent.press(screen.getByText('Pause'));
   await waitFor(() => screen.getByText(/Paused.*0\.6\d km/));
+});
+
+test('adaptive GPS sampling switches to the coarse profile after sustained stillness, and back to fine on real motion', async () => {
+  // watchPositionAsync is a single jest.fn() shared across this whole
+  // file (defined once in the jest.mock factory above) -- other tests
+  // that also press Start Run leave calls on it, so this test needs its
+  // own clean baseline rather than assuming call #1 is its own.
+  Location.watchPositionAsync.mockClear();
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  fireEvent.press(screen.getByText('Start Run'));
+  await waitFor(() => screen.getByText(/Recording/));
+
+  // The initial subscription, from handleStart -- always FINE.
+  await waitFor(() => expect(Location.watchPositionAsync).toHaveBeenCalledTimes(1));
+  expect(Location.watchPositionAsync.mock.calls[0][0]).toMatchObject({ distanceInterval: 5 });
+
+  // MOTION_WINDOW_SIZE (8) consecutive at-rest readings (x=y=0, z=1g --
+  // deviation from 1g is exactly 0) -- the exact number needed to cross
+  // App.js's stillness threshold, no more.
+  for (let i = 0; i < 8; i++) {
+    await act(async () => {
+      accelerometerCallback({ x: 0, y: 0, z: 1 });
+    });
+  }
+  await waitFor(() => expect(Location.watchPositionAsync).toHaveBeenCalledTimes(2));
+  expect(Location.watchPositionAsync.mock.calls[1][0]).toMatchObject({ distanceInterval: 15 });
+
+  // One real-motion reading (magnitude ~1.22g, comfortably over the
+  // threshold) switches back to FINE immediately -- no waiting for a
+  // window of motion samples the way switching TO coarse required.
+  await act(async () => {
+    accelerometerCallback({ x: 0.5, y: 0.5, z: 1 });
+  });
+  await waitFor(() => expect(Location.watchPositionAsync).toHaveBeenCalledTimes(3));
+  expect(Location.watchPositionAsync.mock.calls[2][0]).toMatchObject({ distanceInterval: 5 });
+});
+
+test('ending a run captures a map snapshot, and replaying that run shows it instead of a live map', async () => {
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  fireEvent.press(screen.getByText('Start Run'));
+  await waitFor(() => screen.getByText(/Recording/));
+
+  await act(async () => {
+    fireEvent.press(screen.getByText('End Run'));
+  });
+  await waitFor(() => expect(saveRun).toHaveBeenCalledTimes(1));
+  const savedRun = saveRun.mock.calls[0][0];
+
+  // §2's "offline map tiles for the last route" -- takeSnapshot (a real
+  // react-native-maps API, mocked in __mocks__/react-native-maps.js) is
+  // called while the map is still on screen, then copied out of its temp
+  // location into permanent storage; the saved run carries that permanent
+  // path (this mock's Directory/File .uri join), not the temp one
+  // takeSnapshot returned.
+  expect(MapView.__takeSnapshotMock).toHaveBeenCalledTimes(1);
+  expect(__copyMock).toHaveBeenCalledTimes(1);
+  expect(savedRun.mapSnapshotUri).toBe(`file:///mock-documents/run-snapshots/${savedRun.runUuid}.png`);
+
+  // Replaying that run should show the saved snapshot, not spin up a live
+  // MapView -- getRuns() is stubbed here to hand back exactly the run just
+  // "saved" (these mocks aren't backed by a real DB), matching how a real
+  // getRuns() would return this same row, mapSnapshotUri included.
+  getRuns.mockResolvedValueOnce([savedRun]);
+  fireEvent.press(screen.getByText('New Route')); // handleReset -- back to a fresh 'ready' state
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  fireEvent.press(screen.getByText('Past Runs'));
+  await waitFor(() => screen.getByText('Delete All My Data'));
+  fireEvent.press(screen.getByText(new Date(savedRun.startedAt).toLocaleString()));
+
+  await waitFor(() => screen.getByTestId('run-snapshot-image'));
+  expect(screen.queryAllByTestId('mock-map-view')).toHaveLength(0);
+  expect(screen.queryAllByTestId('mock-polyline')).toHaveLength(0);
+});
+
+test('Delete All My Data also deletes each run\'s snapshot file, not just the database rows', async () => {
+  // deleteAllRuns is a jest.fn() shared across this whole file -- the
+  // earlier plain "Delete All My Data" test already left one call on it,
+  // and restoreAllMocks (afterEach, above) doesn't clear a plain jest.fn()'s
+  // call history, only jest.spyOn mocks -- same reasoning as
+  // Location.watchPositionAsync.mockClear() in the adaptive-sampling test.
+  deleteAllRuns.mockClear();
+  jest.spyOn(Alert, 'alert').mockImplementation((title, message, buttons) => {
+    buttons.find((b) => b.text === 'Delete').onPress();
+  });
+  // A snapshot file with no backing DB row is an orphan nothing will ever
+  // clean up again (see deleteAllData's comment) -- so this has to happen
+  // for every run's snapshot, not just be a no-op when there's nothing to
+  // delete (already implicitly covered by the plain "Delete All My Data"
+  // test above, where pastRuns is empty).
+  getRuns.mockResolvedValueOnce([
+    { id: 1, runUuid: 'a', startedAt: new Date().toISOString(), mapSnapshotUri: 'file:///mock-documents/run-snapshots/a.png' },
+    { id: 2, runUuid: 'b', startedAt: new Date().toISOString(), mapSnapshotUri: null }, // no snapshot -- must not blow up
+  ]);
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  fireEvent.press(screen.getByText('Past Runs'));
+  await waitFor(() => screen.getByText('Delete All My Data'));
+  fireEvent.press(screen.getByText('Delete All My Data'));
+
+  await waitFor(() => expect(deleteAllRuns).toHaveBeenCalledTimes(1));
+  expect(__deleteMock).toHaveBeenCalledTimes(1); // only for run 'a' -- run 'b' had nothing to delete
+  expect(__deleteMock.mock.calls[0][0].uri).toBe('file:///mock-documents/run-snapshots/a.png');
 });

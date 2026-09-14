@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity } from 'react-native';
+import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity, Image } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
+import { Accelerometer } from 'expo-sensors';
+import { Directory, File, Paths } from 'expo-file-system';
 import MapView, { Polyline, Marker } from 'react-native-maps';
 import { saveRun, getRuns, getOrCreateDeviceId, deleteAllRuns } from './db';
 import {
@@ -74,26 +76,20 @@ import {
 //   isn't an Expo gap to work around -- it's Apple's platform rule.
 //   Matches the doc's own §0 phasing: Always/background is v3, explicitly
 //   opt-in, not default.
-// - Offline map tiles for the last route (§2's local-store box lists this
-//   explicitly) -- found while re-sweeping the doc against what's actually
-//   built; genuinely never implemented OR previously acknowledged anywhere
-//   in this file, unlike everything else on this list. Not built now
-//   either: react-native-maps has no built-in tile-caching story, so this
-//   means picking a specific approach (a different maps SDK entirely with
-//   real offline region support, e.g. Mapbox, vs. hand-rolling a tile
-//   cache) -- a real product/library decision, not a small addition, so
-//   it's being named here as a deliberate gap rather than picked
-//   unilaterally.
-// - Adaptive GPS sampling (§2's "switch to a coarser interval automatically
-//   when the accelerometer/motion API shows no movement") -- also found on
-//   the same re-sweep, also never built or previously acknowledged.
-//   WATCH_OPTIONS below is a fixed 2s/5m filter regardless of actual
-//   movement. Battery-life-only (accuracy/functionality are unaffected),
-//   and doing it right means a real motion-detection heuristic (expo-sensors'
-//   Accelerometer, some stationary threshold, watchPositionAsync doesn't
-//   support changing options in place so this would mean tearing down and
-//   restarting the subscription) -- again a real feature to design, not a
-//   one-line fix, so named here rather than built without that design pass.
+//
+// Offline map tiles for the last route (§2's local-store box lists this
+// explicitly) -- named above as a gap on the first sweep, now addressed
+// via a substitution, not literally: see captureRunSnapshot's comment
+// (near handleEnd) for the full reasoning on why a real tile cache would
+// mean a whole different maps SDK, and what's built instead.
+//
+// Adaptive GPS sampling (§2's "switch to a coarser interval automatically
+// when the accelerometer/motion API shows no movement") -- named above as a
+// gap on the first sweep, now built: see WATCH_OPTIONS_FINE/_COARSE,
+// startMotionMonitoring, and switchGpsMode below. Battery-only in effect
+// (accuracy/functionality are unaffected either way) -- switches to a
+// coarser watchPositionAsync profile after 4s of accelerometer-detected
+// stillness, and back to fine on the very first sign of real motion again.
 //
 // Addressing: an iOS Simulator shares the host Mac's network stack, so
 // localhost reaches a server running on the same machine directly. That is
@@ -143,11 +139,38 @@ const API_KEY = process.env.EXPO_PUBLIC_PATHFINDER_API_KEY || 'REPLACE_WITH_YOUR
 // on the list. If that decision ever gets revisited, it's
 // isAndroidForegroundServiceEnabled in the expo-location config plugin
 // (app.json), not a rewrite of the tracking logic here.
-const WATCH_OPTIONS = {
+// Two profiles, not one -- §2's adaptive-sampling requirement (see
+// startMotionMonitoring below for the switching logic). FINE is the
+// original, unchanged fixed values; COARSE only kicks in once the
+// accelerometer has shown sustained stillness, and switches back to FINE
+// on the very first sign of real motion again -- so a real run's actual
+// distance is never at risk of being under-sampled, only genuinely
+// stationary stretches (stopped at a light, tying a shoe) sample less.
+const WATCH_OPTIONS_FINE = {
   accuracy: Location.Accuracy.BestForNavigation,
   timeInterval: 2000,   // ms between updates (Android only, per expo-location docs)
   distanceInterval: 5,  // meters -- don't bother updating for sub-5m jitter
 };
+const WATCH_OPTIONS_COARSE = {
+  accuracy: Location.Accuracy.BestForNavigation,
+  timeInterval: 8000,
+  distanceInterval: 15,
+};
+
+// Accelerometer-based stillness detection, for the coarse/fine switch
+// above. Sampled well below running's natural cadence (a footstrike cycle
+// is roughly 1.5-3Hz) so genuine running always shows real variation in
+// this window; watching for the ABSENCE of that variation is what flags
+// "stopped," not any single still-looking reading (one sample can land
+// mid-stride at near-1g by chance).
+const MOTION_SAMPLE_INTERVAL_MS = 500;
+const MOTION_WINDOW_SIZE = 8; // 8 * 500ms = 4s of history before a switch to COARSE is even considered
+// Deviation from 1g (at-rest gravity reads ~1.0 on the magnitude below).
+// Stationary-in-hand/armband jitter measured well under this; a genuine
+// footstrike, even walking gently, measured well over it -- ad hoc, not
+// lab-tuned, same "revisit once real outdoor tests exist" status as
+// DEVIATION_THRESHOLD_M below.
+const STATIONARY_DEVIATION_THRESHOLD = 0.08;
 
 // How far off the generated route (meters) before flagging a deviation.
 // Ad hoc starting point, not tuned: needs to comfortably clear normal GPS
@@ -176,6 +199,14 @@ export default function App() {
   const replayMapRef = useRef(null);
   const [replayMapReady, setReplayMapReady] = useState(false);
   const watchSubscriptionRef = useRef(null);
+  // Adaptive GPS sampling state -- see WATCH_OPTIONS_FINE/_COARSE above.
+  // All plain refs, not state: none of this drives a render directly
+  // (gpsModeRef only changes which options the NEXT watchPositionAsync
+  // call uses; motionSamplesRef is scratch space for the stillness check),
+  // same reasoning as traceRef below.
+  const accelSubscriptionRef = useRef(null);
+  const motionSamplesRef = useRef([]);
+  const gpsModeRef = useRef('fine');
 
   // The full GPS trace for the run in progress -- a plain ref, not React
   // state: every watchPositionAsync callback appends to it, and doing that
@@ -392,6 +423,86 @@ export default function App() {
     }
   }
 
+  // The actual per-position handling, pulled out of the watchPositionAsync
+  // call itself (unlike before) so switchGpsMode below can re-subscribe
+  // with different options while reusing the exact same handling logic --
+  // there's nothing FINE-vs-COARSE-specific about what a position update
+  // does once it arrives, only about how often one arrives.
+  function handleLocationUpdate(position) {
+    const coord = {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+    };
+    // Full trace, for run history -- every point, not just the latest.
+    traceRef.current.push({ ...coord, timestamp: position.timestamp });
+    setLiveCoord(coord);
+    setDeviationDistance(distanceToRouteMeters(coord, selectedCoords));
+    // Recomputed from the same trace saveRun/handleEnd will eventually
+    // use (traceDistanceMeters), not tracked separately -- so the live
+    // number and the one that ends up in run history can't drift apart.
+    setLiveDistanceM(traceDistanceMeters(traceRef.current));
+  }
+
+  async function beginLocationWatch(options) {
+    watchSubscriptionRef.current = await Location.watchPositionAsync(options, handleLocationUpdate);
+  }
+
+  function stopLocationWatch() {
+    watchSubscriptionRef.current?.remove();
+    watchSubscriptionRef.current = null;
+  }
+
+  // Swaps the active watchPositionAsync subscription for one using the
+  // other profile (WATCH_OPTIONS_FINE/_COARSE) -- expo-location has no
+  // "update an active subscription's options" call, so this is a genuine
+  // remove-then-resubscribe, not a config tweak. No-ops if already in the
+  // requested mode, so the frequent "still moving, still fine" case from
+  // startMotionMonitoring below doesn't churn a subscription on every
+  // single accelerometer sample.
+  async function switchGpsMode(mode) {
+    if (gpsModeRef.current === mode) return;
+    gpsModeRef.current = mode;
+    stopLocationWatch();
+    await beginLocationWatch(mode === 'coarse' ? WATCH_OPTIONS_COARSE : WATCH_OPTIONS_FINE);
+  }
+
+  // §2's adaptive sampling: watches the accelerometer for sustained
+  // stillness and switches the GPS profile accordingly (see
+  // WATCH_OPTIONS_FINE/_COARSE and the constants above for the exact
+  // thresholds/reasoning). Runs alongside the location watch for the
+  // whole time a run is active, not just at start -- stillness can begin
+  // or end at any point mid-run.
+  function startMotionMonitoring() {
+    motionSamplesRef.current = [];
+    Accelerometer.setUpdateInterval(MOTION_SAMPLE_INTERVAL_MS);
+    accelSubscriptionRef.current = Accelerometer.addListener(({ x, y, z }) => {
+      const deviation = Math.abs(Math.sqrt(x * x + y * y + z * z) - 1);
+      const samples = motionSamplesRef.current;
+
+      if (deviation > STATIONARY_DEVIATION_THRESHOLD) {
+        // Any real motion at all -- back to FINE immediately, no
+        // hysteresis in this direction. Clear the window too: a fresh
+        // stillness window has to build up again from here, not carry
+        // over old (now stale) quiet samples from before this motion.
+        samples.length = 0;
+        switchGpsMode('fine');
+        return;
+      }
+
+      samples.push(deviation);
+      if (samples.length > MOTION_WINDOW_SIZE) samples.shift();
+      if (samples.length === MOTION_WINDOW_SIZE) {
+        switchGpsMode('coarse');
+      }
+    });
+  }
+
+  function stopMotionMonitoring() {
+    accelSubscriptionRef.current?.remove();
+    accelSubscriptionRef.current = null;
+    motionSamplesRef.current = [];
+  }
+
   // Continuous sampling starts here, and ONLY here -- when a run actually
   // starts, not on app load. The one-shot getCurrentPositionAsync above (to
   // know where to generate a route from) is unrelated to this.
@@ -401,25 +512,14 @@ export default function App() {
       Alert.alert('Location permission required', 'Pathfinder Run needs your location to track this run.');
       return;
     }
-    watchSubscriptionRef.current = await Location.watchPositionAsync(WATCH_OPTIONS, (position) => {
-      const coord = {
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-      };
-      // Full trace, for run history -- every point, not just the latest.
-      traceRef.current.push({ ...coord, timestamp: position.timestamp });
-      setLiveCoord(coord);
-      setDeviationDistance(distanceToRouteMeters(coord, selectedCoords));
-      // Recomputed from the same trace saveRun/handleEnd will eventually
-      // use (traceDistanceMeters), not tracked separately -- so the live
-      // number and the one that ends up in run history can't drift apart.
-      setLiveDistanceM(traceDistanceMeters(traceRef.current));
-    });
+    gpsModeRef.current = 'fine';
+    await beginLocationWatch(WATCH_OPTIONS_FINE);
+    startMotionMonitoring();
   }
 
   function stopWatching() {
-    watchSubscriptionRef.current?.remove();
-    watchSubscriptionRef.current = null;
+    stopLocationWatch();
+    stopMotionMonitoring();
   }
 
   async function handleStart() {
@@ -450,6 +550,55 @@ export default function App() {
     await startWatching();
   }
 
+  // §2's "offline map tiles for the last route" -- addressed via a
+  // substitution, not literally, and worth being explicit about why: real
+  // offline *tile* caching would mean swapping react-native-maps for a
+  // different maps SDK entirely (e.g. Mapbox/MapLibre with genuine offline
+  // region packs) -- neither Apple Maps nor Google Maps (what
+  // react-native-maps actually renders) exposes a supported way to cache
+  // their own tiles for offline reuse, and their terms don't really allow
+  // hand-rolling that either. That's a real product/library decision
+  // (a new SDK, possibly a new API key, a licensing/cost model, a native
+  // rebuild) -- too large to make unilaterally as a "sweep and fix."
+  //
+  // What this actually does instead: captures a static image of the map
+  // WHILE it's still on-screen and online, using MapView.takeSnapshot --
+  // a real, supported react-native-maps API, not a workaround -- and
+  // saves it permanently. Viewing that past run later needs no network
+  // and no live tiles at all, which is the actual thing "offline map
+  // tiles for the last route" was for. Trade-off: one fixed-size raster
+  // per run (not pan/zoomable, and it's the last few seconds' MapView
+  // state -- the planned route + last known position, not literally the
+  // full recorded trace, since that's what's actually on screen at this
+  // exact moment), not a real tile cache -- but it solves the underlying
+  // need with infrastructure the app already has.
+  async function captureRunSnapshot(runUuid) {
+    if (!mapRef.current) return null;
+    try {
+      const tempUri = await mapRef.current.takeSnapshot({
+        width: 800,
+        height: 600,
+        format: 'png',
+        quality: 0.8,
+        result: 'file',
+      });
+      const dir = new Directory(Paths.document, 'run-snapshots');
+      dir.create({ idempotent: true });
+      const dest = new File(dir, `${runUuid}.png`);
+      await new File(tempUri).copy(dest);
+      return dest.uri;
+    } catch (err) {
+      // Best-effort, same spirit as syncRunToServer's own failure handling
+      // right below -- the run's actual data (trace, distance, duration)
+      // is what matters and is already safely captured regardless; a
+      // failed snapshot just means this one run's replay falls back to
+      // the live MapView (see the replay screen render, below), not a
+      // lost run.
+      console.warn('Could not capture run map snapshot (replay will use the live map instead):', err.message || err);
+      return null;
+    }
+  }
+
   async function handleEnd() {
     stopWatching();
     const timing = runTimingRef.current;
@@ -458,6 +607,10 @@ export default function App() {
       timing.segmentStartedAt = null;
     }
     const trace = traceRef.current;
+    // Captured before setSessionState('done') below -- the main map is
+    // still showing this run's route + last live position right up until
+    // that state change swaps the controls row to "New Route".
+    const mapSnapshotUri = await captureRunSnapshot(runUuidRef.current);
     const run = {
       startedAt: timing.startedAt,
       targetDistanceM: TARGET_DISTANCE_M,
@@ -465,6 +618,7 @@ export default function App() {
       durationMs: timing.activeMs,
       trace,
       runUuid: runUuidRef.current,
+      mapSnapshotUri,
     };
     try {
       await saveRun(run);
@@ -611,6 +765,22 @@ export default function App() {
           onPress: async () => {
             setDeletingData(true);
             try {
+              // Snapshot files (captureRunSnapshot) live outside the SQLite
+              // row that references them -- deleteAllRuns only clears the
+              // rows, so without this every run's snapshot would become an
+              // orphaned file nothing ever references or cleans up again.
+              // Gathered from pastRuns (already the current list, since
+              // this button only renders on the screen that just loaded
+              // it) rather than a fresh query, and deletion is best-effort
+              // per file -- one already-missing/unreadable file shouldn't
+              // block clearing the rest of a user's data.
+              for (const uri of pastRuns.map((r) => r.mapSnapshotUri).filter(Boolean)) {
+                try {
+                  new File(uri).delete();
+                } catch (err) {
+                  console.warn('Could not delete run snapshot file:', uri, err.message || err);
+                }
+              }
               await deleteAllRuns();
               try {
                 const deviceId = await getOrCreateDeviceId();
@@ -706,7 +876,22 @@ export default function App() {
         <Text style={styles.runStats}>
           {formatDistance(selectedRun.actualDistanceM)} (target {formatDistance(selectedRun.targetDistanceM)}) · {formatDuration(selectedRun.durationMs)}
         </Text>
-        {selectedRun.trace && selectedRun.trace.length > 0 ? (
+        {selectedRun.mapSnapshotUri ? (
+          // §2's "offline map tiles for the last route" -- see
+          // captureRunSnapshot's comment for the full reasoning. A plain
+          // Image, not a MapView: no live tile fetch at all, so this
+          // renders identically with no network. Not pan/zoomable, and
+          // shows the planned route + end position (whatever the main map
+          // had on screen at handleEnd), not this exact Polyline trace --
+          // a real trade-off against the MapView branch below, worth
+          // taking for runs new enough to have one.
+          <Image
+            testID="run-snapshot-image"
+            source={{ uri: selectedRun.mapSnapshotUri }}
+            style={styles.map}
+            resizeMode="cover"
+          />
+        ) : selectedRun.trace && selectedRun.trace.length > 0 ? (
           <MapView
             ref={replayMapRef}
             style={styles.map}
