@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity, Image } from 'react-native';
+import { StyleSheet, Text, View, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity, Image } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
@@ -91,6 +91,20 @@ import {
 // (accuracy/functionality are unaffected either way) -- switches to a
 // coarser watchPositionAsync profile after 4s of accelerometer-detected
 // stillness, and back to fine on the very first sign of real motion again.
+//
+// Accessibility pass (researched WCAG/HIG/Material touch-target and
+// screen-reader guidance first, see AppButton's own comment for the
+// buttons half of this): every button, the distance chips, and the past-
+// runs list rows now carry real accessibilityRole/accessibilityLabel
+// (and accessibilityState for the chips' selected one), not just visual
+// styling a screen reader can't see. What's deliberately NOT covered:
+// the map itself. Picking an alternate route by tapping its Polyline on
+// the map, and the live position Marker during a run, are both
+// inherently spatial/visual interactions -- react-native-maps doesn't
+// expose a meaningful screen-reader story for either, and building a
+// real non-map alternative (e.g., a list-based route picker as a
+// screen-reader-only fallback) is a genuine feature, not a prop to add,
+// so it's named here rather than silently left uncovered.
 //
 // Addressing: an iOS Simulator shares the host Mac's network stack, so
 // localhost reaches a server running on the same machine directly. That is
@@ -204,6 +218,49 @@ const DEVIATION_THRESHOLD_M = 40;
 // modules App.js itself imports, which can't load under plain Jest). See
 // geometry.js's own header and __tests__/geometry.test.js -- the
 // mobile-side counterpart to scripts/tests/test_geometry.py.
+
+// A UI/UX pass, researched before building rather than guessed at: this
+// app used React Native's stock <Button> everywhere -- on iOS that
+// renders as plain colored text with no visible button boundary at all,
+// and its actual tappable area isn't guaranteed to clear the 44x44pt
+// (iOS)/48x48dp (Android) minimum touch target both platforms'
+// accessibility guidelines call for, especially at this app's default
+// font size. It also can't carry the app's own established identity
+// (the route-green from generate_icons.py/the app icon) consistently --
+// <Button color="..."> recolors text on iOS but the whole background pill
+// on Android, so the same color prop looks like two different design
+// languages depending on platform.
+//
+// One shared, explicitly-sized button instead of restyling each call site
+// ad hoc -- four variants matching this app's actual action types, not a
+// generic kit: primary (the one forward action on a given screen -- solid
+// route-green), secondary (an alternate/lesser action -- outlined, same
+// green), destructive (ends or deletes something -- solid red, already
+// this app's existing #B00020), and closure (its own semantic color,
+// #8B4513, kept distinct from primary/destructive since "report a
+// closure" is neither). minHeight 48 on buttonBase covers both
+// platforms' minimums regardless of title length/font scaling.
+function AppButton({ title, onPress, variant = 'primary', disabled = false }) {
+  const variantStyles = {
+    primary: [styles.buttonPrimary, styles.buttonPrimaryText],
+    secondary: [styles.buttonSecondary, styles.buttonSecondaryText],
+    destructive: [styles.buttonDestructive, styles.buttonDestructiveText],
+    closure: [styles.buttonClosure, styles.buttonClosureText],
+  };
+  const [containerStyle, textStyle] = variantStyles[variant];
+  return (
+    <TouchableOpacity
+      onPress={onPress}
+      disabled={disabled}
+      style={[styles.buttonBase, containerStyle, disabled && styles.buttonDisabled]}
+      accessibilityRole="button"
+      accessibilityLabel={title}
+      accessibilityState={{ disabled }}
+    >
+      <Text style={[styles.buttonBaseText, textStyle]}>{title}</Text>
+    </TouchableOpacity>
+  );
+}
 
 export default function App() {
   const mapRef = useRef(null);
@@ -910,7 +967,7 @@ export default function App() {
       <View style={styles.container}>
         <View style={styles.historyHeader}>
           <Text style={styles.historyTitle}>{new Date(selectedRun.startedAt).toLocaleString()}</Text>
-          <Button title="Back" onPress={closeRunReplay} />
+          <AppButton title="Back" variant="secondary" onPress={closeRunReplay} />
         </View>
         <Text style={styles.runStats}>
           {formatDistance(selectedRun.actualDistanceM)} (target {formatDistance(selectedRun.targetDistanceM)}) · {formatDuration(selectedRun.durationMs)}
@@ -929,6 +986,7 @@ export default function App() {
             source={{ uri: selectedRun.mapSnapshotUri }}
             style={styles.map}
             resizeMode="cover"
+            accessibilityLabel={`Map of the route for the run on ${new Date(selectedRun.startedAt).toLocaleString()}`}
           />
         ) : selectedRun.trace && selectedRun.trace.length > 0 ? (
           <MapView
@@ -959,7 +1017,7 @@ export default function App() {
       <View style={styles.container}>
         <View style={styles.historyHeader}>
           <Text style={styles.historyTitle}>Past Runs</Text>
-          <Button title="Back" onPress={closeHistory} />
+          <AppButton title="Back" variant="secondary" onPress={closeHistory} />
         </View>
         {loadingHistory ? (
           <ActivityIndicator style={styles.historyLoading} size="large" />
@@ -975,21 +1033,30 @@ export default function App() {
             // rows saved before the run_uuid column existed (a NULL
             // runUuid there) -- every row has at least one of the two.
             keyExtractor={(item) => item.runUuid || String(item.id)}
-            renderItem={({ item }) => (
-              <TouchableOpacity style={styles.runRow} onPress={() => viewRunReplay(item)}>
-                <Text style={styles.runDate}>{new Date(item.startedAt).toLocaleString()}</Text>
-                <Text style={styles.runStats}>
-                  {formatDistance(item.actualDistanceM)} (target {formatDistance(item.targetDistanceM)}) · {formatDuration(item.durationMs)}
-                </Text>
-              </TouchableOpacity>
-            )}
+            renderItem={({ item }) => {
+              const dateLabel = new Date(item.startedAt).toLocaleString();
+              const statsLabel = `${formatDistance(item.actualDistanceM)}, target ${formatDistance(item.targetDistanceM)}, ${formatDuration(item.durationMs)}`;
+              return (
+                <TouchableOpacity
+                  style={styles.runRow}
+                  onPress={() => viewRunReplay(item)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Run on ${dateLabel}: ${statsLabel}`}
+                >
+                  <Text style={styles.runDate}>{dateLabel}</Text>
+                  <Text style={styles.runStats}>
+                    {formatDistance(item.actualDistanceM)} (target {formatDistance(item.targetDistanceM)}) · {formatDuration(item.durationMs)}
+                  </Text>
+                </TouchableOpacity>
+              );
+            }}
           />
         )}
         <View style={styles.deleteDataRow}>
           {deletingData ? (
             <ActivityIndicator size="small" />
           ) : (
-            <Button title="Delete All My Data" color="#B00020" onPress={deleteAllData} />
+            <AppButton title="Delete All My Data" variant="destructive" onPress={deleteAllData} />
           )}
         </View>
         <StatusBar style="auto" />
@@ -1065,7 +1132,7 @@ export default function App() {
           // argument, which generateRoute would otherwise take as a truthy
           // distanceOverride instead of falling back to targetDistanceM
           // state. Same reasoning below for Regenerate.
-          <Button title={`Generate ${targetDistanceM / 1000}km route from here`} onPress={() => generateRoute()} />
+          <AppButton title={`Generate ${targetDistanceM / 1000}km route from here`} variant="primary" onPress={() => generateRoute()} />
         )}
         {sessionState === 'ready' && (
           <>
@@ -1081,21 +1148,27 @@ export default function App() {
                 distance immediately, same as Regenerate but at a new
                 target -- see DISTANCE_PRESETS_M/selectDistance above. */}
             <View style={styles.buttonRow}>
-              {DISTANCE_PRESETS_M.map((meters) => (
-                <TouchableOpacity
-                  key={meters}
-                  onPress={() => selectDistance(meters)}
-                  style={[styles.distanceChip, meters === targetDistanceM && styles.distanceChipSelected]}
-                >
-                  <Text style={[styles.distanceChipText, meters === targetDistanceM && styles.distanceChipTextSelected]}>
-                    {meters / 1000}km
-                  </Text>
-                </TouchableOpacity>
-              ))}
+              {DISTANCE_PRESETS_M.map((meters) => {
+                const isSelected = meters === targetDistanceM;
+                return (
+                  <TouchableOpacity
+                    key={meters}
+                    onPress={() => selectDistance(meters)}
+                    style={[styles.distanceChip, isSelected && styles.distanceChipSelected]}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${meters / 1000} kilometers`}
+                    accessibilityState={{ selected: isSelected }}
+                  >
+                    <Text style={[styles.distanceChipText, isSelected && styles.distanceChipTextSelected]}>
+                      {meters / 1000}km
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
             <View style={styles.buttonRow}>
-              <Button title="Regenerate" onPress={() => generateRoute()} />
-              <Button title="Start Run" onPress={handleStart} />
+              <AppButton title="Regenerate" variant="secondary" onPress={() => generateRoute()} />
+              <AppButton title="Start Run" variant="primary" onPress={handleStart} />
             </View>
           </>
         )}
@@ -1109,8 +1182,8 @@ export default function App() {
               ● Recording -- {formatDistance(liveDistanceM)} · {formatDuration(liveDurationMs)}
             </Text>
             <View style={styles.buttonRow}>
-              <Button title="Pause" onPress={handlePause} />
-              <Button title="End Run" color="#B00020" onPress={handleEnd} />
+              <AppButton title="Pause" variant="secondary" onPress={handlePause} />
+              <AppButton title="End Run" variant="destructive" onPress={handleEnd} />
             </View>
           </>
         )}
@@ -1120,8 +1193,8 @@ export default function App() {
               ⏸ Paused -- {formatDistance(liveDistanceM)} · {formatDuration(liveDurationMs)}
             </Text>
             <View style={styles.buttonRow}>
-              <Button title="Resume" onPress={handleResume} />
-              <Button title="End Run" color="#B00020" onPress={handleEnd} />
+              <AppButton title="Resume" variant="primary" onPress={handleResume} />
+              <AppButton title="End Run" variant="destructive" onPress={handleEnd} />
             </View>
           </>
         )}
@@ -1159,7 +1232,7 @@ export default function App() {
                 </View>
               </>
             )}
-            <Button title="New Route" onPress={handleReset} />
+            <AppButton title="New Route" variant="primary" onPress={handleReset} />
           </View>
         )}
         {canReportClosure && (
@@ -1167,13 +1240,13 @@ export default function App() {
             {reportingClosure ? (
               <ActivityIndicator />
             ) : (
-              <Button title="Report closure" color="#8B4513" onPress={handleReportClosure} />
+              <AppButton title="Report closure" variant="closure" onPress={handleReportClosure} />
             )}
           </View>
         )}
         {canShowHistory && (
           <View style={styles.reportRow}>
-            <Button title="Past Runs" onPress={openHistory} />
+            <AppButton title="Past Runs" variant="secondary" onPress={openHistory} />
           </View>
         )}
       </View>
@@ -1186,6 +1259,52 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
+  },
+  // AppButton, above -- see that component's own comment for the
+  // reasoning. minHeight 48 (not just paddingVertical) so short titles
+  // ("Back", "Pause") still clear both platforms' minimum touch target,
+  // not just long ones that happen to wrap enough padding around them.
+  buttonBase: {
+    minHeight: 48,
+    minWidth: 88,
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  buttonBaseText: {
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  buttonPrimary: {
+    backgroundColor: '#2E7D32',
+  },
+  buttonPrimaryText: {
+    color: '#fff',
+  },
+  buttonSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
+    borderColor: '#2E7D32',
+  },
+  buttonSecondaryText: {
+    color: '#2E7D32',
+  },
+  buttonDestructive: {
+    backgroundColor: '#B00020',
+  },
+  buttonDestructiveText: {
+    color: '#fff',
+  },
+  buttonClosure: {
+    backgroundColor: '#8B4513',
+  },
+  buttonClosureText: {
+    color: '#fff',
   },
   map: {
     flex: 1,

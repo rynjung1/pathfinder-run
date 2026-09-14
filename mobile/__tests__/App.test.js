@@ -193,6 +193,32 @@ test('picking a distance preset regenerates the route requesting that exact dist
   expect(JSON.parse(finalCalls[2][1].body)).toMatchObject({ distance: 3000 });
 });
 
+test('distance chips are real accessible buttons, and accessibilityState tracks which one is selected', async () => {
+  // Formalizes the accessibility pass -- these were plain TouchableOpacity
+  // wrappers with no accessibilityRole/Label/State before, meaning a
+  // screen reader had no way to know they were buttons, what they did, or
+  // which one was currently active (the selected look was purely visual,
+  // a filled background). getByRole with a `selected` matcher only finds
+  // an element if accessibilityRole/State are both actually set correctly
+  // -- this fails if either prop is missing or wrong, not just if the
+  // button doesn't exist at all.
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  expect(screen.getByRole('button', { name: '5 kilometers', selected: true })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '3 kilometers', selected: false })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '8 kilometers', selected: false })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '10 kilometers', selected: false })).toBeTruthy();
+
+  fireEvent.press(screen.getByRole('button', { name: '8 kilometers' }));
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  // Selection moved with the actual choice -- 8km is now selected, 5km
+  // (the previous choice) no longer is.
+  expect(screen.getByRole('button', { name: '8 kilometers', selected: true })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '5 kilometers', selected: false })).toBeTruthy();
+});
+
 test('Delete All My Data clears local runs and calls the server DELETE endpoint', async () => {
   // Alert.alert is a native modal Jest can't render -- stand in for the
   // user tapping "Delete" by invoking that button's onPress directly,
