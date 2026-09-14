@@ -3,11 +3,12 @@ import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, Fla
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import MapView, { Polyline, Marker } from 'react-native-maps';
-import { saveRun, getRuns } from './db';
+import { saveRun, getRuns, getOrCreateDeviceId } from './db';
 import {
   distanceToRouteMeters,
   formatDistance,
   formatDuration,
+  mergeRunHistory,
   traceDistanceMeters,
 } from './geometry';
 
@@ -18,23 +19,34 @@ import {
 // round trip needed for this). Run-session state machine per §2:
 //   idle -> generating -> ready -> running -> paused -> done -> (idle)
 //
-// Also here: local run history (§2's "cached routes, run history" local
-// store) -- the full GPS trace is captured during an active run (not just
-// the single latest liveCoord the deviation check needs), and a run
-// record is saved to SQLite (db.js -- see that file for the storage
-// investigation) when a session reaches 'done'. A basic past-runs list
-// screen shows date/distance/duration for each saved run.
+// Also here: run history (§2's "cached routes, run history" local store)
+// -- the full GPS trace is captured during an active run (not just the
+// single latest liveCoord the deviation check needs), and a run record is
+// saved to SQLite (db.js -- see that file for the storage investigation)
+// when a session reaches 'done'. A past-runs list screen shows
+// date/distance/duration for each saved run, and tapping one replays its
+// actual recorded trace on a map (viewRunReplay, below) -- not the
+// originally-generated route, the real path that was recorded.
+//
+// Local storage is always authoritative; on top of it, a completed run is
+// also synced to the server on a best-effort basis (syncRunToServer,
+// device-scoped via db.js's getOrCreateDeviceId -- no user accounts exist
+// in this app). See runs.py's module docstring for exactly what this does
+// and doesn't protect against: real durability against local data loss
+// short of an app reinstall, NOT a guarantee your history survives
+// reinstalling the app (the device id lives in the same local database as
+// the history it's meant to back up).
 //
 // Deliberately NOT here yet:
 // - Rerouting once a deviation is detected -- detection + a UI indicator
 //   only for now, no recalculation logic.
-// - Server-side sync of run history -- local-only for now, a separate
-//   later step once local history proves useful (explicitly scoped this
-//   way, not an oversight).
-// - Route replay-on-map for a past run -- the polyline-rendering code
-//   already exists (see the MapView below) but wiring a past run's trace
-//   back into it, plus the screen/navigation to get there, is more than
-//   this slice's "basic list" scope asked for.
+// - A retry queue for failed syncs -- syncRunToServer is attempted once,
+//   right after a run ends; if it fails (no network, server down), the
+//   run stays local-only until manually reconciled some other way. No
+//   background retry, no "pending sync" state tracked.
+// - Real user accounts / login, which would let sync survive a reinstall
+//   or work across devices -- see runs.py's module docstring for why
+//   device-scoped sync was the deliberately narrower thing built instead.
 // - Android foreground service + persistent notification. Confirmed
 //   feasible without ACCESS_BACKGROUND_LOCATION (verified directly from
 //   expo-location's config-plugin source: isAndroidForegroundServiceEnabled
@@ -140,6 +152,13 @@ export default function App() {
   // is when the CURRENT running segment began, added into activeMs on the
   // next pause/end.
   const runTimingRef = useRef({ startedAt: null, activeMs: 0, segmentStartedAt: null });
+  // This run's id, assigned fresh in handleStart -- before it's saved
+  // locally or synced to the server, so both agree on the same value.
+  // Used as the server sync idempotency key (see syncRunToServer);
+  // Math.random(), not crypto.randomUUID(), same "not security-sensitive,
+  // not worth a Hermes Web Crypto availability check" reasoning as
+  // db.js's device id.
+  const runUuidRef = useRef(null);
 
   // idle | generating | ready | running | paused | done
   const [sessionState, setSessionState] = useState('idle');
@@ -339,6 +358,7 @@ export default function App() {
     // starting, not a resume (that's handleResume, below).
     traceRef.current = [];
     runTimingRef.current = { startedAt: new Date().toISOString(), activeMs: 0, segmentStartedAt: Date.now() };
+    runUuidRef.current = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     setSessionState('running');
     await startWatching();
   }
@@ -367,22 +387,56 @@ export default function App() {
       timing.segmentStartedAt = null;
     }
     const trace = traceRef.current;
+    const run = {
+      startedAt: timing.startedAt,
+      targetDistanceM: TARGET_DISTANCE_M,
+      actualDistanceM: traceDistanceMeters(trace),
+      durationMs: timing.activeMs,
+      trace,
+      runUuid: runUuidRef.current,
+    };
     try {
-      await saveRun({
-        startedAt: timing.startedAt,
-        targetDistanceM: TARGET_DISTANCE_M,
-        actualDistanceM: traceDistanceMeters(trace),
-        durationMs: timing.activeMs,
-        trace,
-      });
+      await saveRun(run);
     } catch (err) {
-      // Local-only storage, no server fallback -- if this fails the run's
-      // data really is gone. Surfaced plainly rather than silently
-      // swallowed, but doesn't block finishing the session (there's
-      // nothing left to retry against here).
+      // Local storage is still the one place a run's data can be lost for
+      // real -- if this fails there's nothing left to fall back on.
+      // Surfaced plainly rather than silently swallowed, but doesn't block
+      // finishing the session (there's nothing left to retry against here).
       Alert.alert('Could not save run', String(err.message || err));
     }
+    // Best-effort server sync, AFTER the local save already succeeded (or
+    // failed) -- local storage is authoritative; this is a durability
+    // layer on top, not a replacement. Deliberately not surfaced to the
+    // user on failure (no network, server down, etc.): the run is already
+    // safely saved locally, and interrupting the post-run flow with a
+    // sync-specific error the user can't act on would be worse than
+    // silently skipping it. See db.js/runs.py for what this sync does and
+    // doesn't protect against (notably: not an app reinstall).
+    syncRunToServer(run).catch((err) => {
+      console.warn('Run sync failed (saved locally, will not retry):', err.message || err);
+    });
     setSessionState('done');
+  }
+
+  async function syncRunToServer(run) {
+    const deviceId = await getOrCreateDeviceId();
+    const response = await fetch(`${API_BASE_URL}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+      body: JSON.stringify({
+        deviceId,
+        runUuid: run.runUuid,
+        startedAt: run.startedAt,
+        targetDistanceM: run.targetDistanceM,
+        actualDistanceM: run.actualDistanceM,
+        durationMs: run.durationMs,
+        trace: run.trace,
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `route_api returned ${response.status}`);
+    }
   }
 
   // §6/§7 step 5: report a closure using whatever position we already have --
@@ -423,7 +477,35 @@ export default function App() {
     setLoadingHistory(true);
     try {
       const runs = await getRuns();
-      setPastRuns(runs);
+      // Merge in anything synced under this device id that the local
+      // list doesn't already have. Honest about how little this
+      // typically adds right now: since sync only ever pushes local ->
+      // server, and the device id lives in the same local database as
+      // the runs themselves (see db.js), there's normally nothing on the
+      // server this device doesn't already have locally. This mainly
+      // matters for a narrower case -- local run data lost to something
+      // short of a full reinstall (a bug, partial corruption) while the
+      // device row itself survived -- and it's the same code path a real
+      // "log in and see your history from another device" feature would
+      // reuse later, so it's not dead code even though it rarely
+      // surfaces anything new today. Failures here are silent, not
+      // alerted -- the local list is already valid and displayed either
+      // way; a missing server merge shouldn't block viewing local
+      // history.
+      let merged = runs;
+      try {
+        const deviceId = await getOrCreateDeviceId();
+        const response = await fetch(`${API_BASE_URL}/runs?deviceId=${encodeURIComponent(deviceId)}`, {
+          headers: { 'X-API-Key': API_KEY },
+        });
+        if (response.ok) {
+          const body = await response.json();
+          merged = mergeRunHistory(runs, body.runs || []);
+        }
+      } catch (err) {
+        console.warn('Could not fetch server-synced run history:', err.message || err);
+      }
+      setPastRuns(merged);
     } catch (err) {
       Alert.alert('Could not load past runs', String(err.message || err));
     } finally {
@@ -527,7 +609,11 @@ export default function App() {
         ) : (
           <FlatList
             data={pastRuns}
-            keyExtractor={(item) => String(item.id)}
+            // item.id only exists for locally-saved rows; server-merged
+            // runs (openHistory) only have runUuid. Fall back to id for
+            // rows saved before the run_uuid column existed (a NULL
+            // runUuid there) -- every row has at least one of the two.
+            keyExtractor={(item) => item.runUuid || String(item.id)}
             renderItem={({ item }) => (
               <TouchableOpacity style={styles.runRow} onPress={() => viewRunReplay(item)}>
                 <Text style={styles.runDate}>{new Date(item.startedAt).toLocaleString()}</Text>

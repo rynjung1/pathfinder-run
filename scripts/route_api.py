@@ -5,14 +5,19 @@ Pathfinder Run -- v1 mobile client backbone, §7 step 3.
 A minimal HTTP wrapper around generate_loop.py's candidate generation, so a
 mobile client has something to call over the network instead of shelling
 out to the CLI script. Still deliberately NOT the full API gateway from
-§4 -- no user accounts, no persistence beyond closures.db, no request
-logging beyond the WSGI server's default -- but as of the pre-deployment
-hardening pass, no longer wide open either: a static shared API key
-(require_api_key), per-IP rate limits (flask-limiter), input caps on
-/route, and per-report resolve tokens on /closures are all real now. See
-that hardening review's own notes for what's covered and what's
-explicitly still deferred (real user accounts, per-city closure
-filtering, etc.).
+§4 -- no user accounts, no request logging beyond the WSGI server's
+default -- but as of the pre-deployment hardening pass, no longer wide
+open either: a static shared API key (require_api_key), per-IP rate
+limits (flask-limiter), input caps on /route, and per-report resolve
+tokens on /closures are all real now. See that hardening review's own
+notes for what's covered and what's explicitly still deferred (real user
+accounts, per-city closure filtering, etc.).
+
+Persistence: closures.db (crowdsourced closures) and now runs.db
+(server-side run-history sync, §2/§4's "run history" -- see runs.py's
+module docstring for the device-scoped identity model and its honest
+limits, most importantly that it does NOT survive an app reinstall on
+its own).
 
 All endpoints below except /health require an `X-API-Key` header
 matching the PATHFINDER_API_KEY environment variable (see .env.example).
@@ -71,6 +76,30 @@ Endpoints:
     -> 404: no closure with that id
     -> 429: rate limit exceeded
 
+    POST /runs  (rate limit: 20/min per IP) -- §2/§4's server-side run
+    history sync. runUuid is client-generated (mobile/db.js assigns one
+    per run at creation, before it's even saved locally) and used as the
+    idempotency key -- syncing the same run twice is a successful no-op,
+    not an error (see runs.py's store_run).
+    body: {"deviceId": "...", "runUuid": "...", "startedAt": "...",
+            "targetDistanceM": 5000, "actualDistanceM": 4820.3,
+            "durationMs": 1620000, "trace": [{"latitude", "longitude",
+            "timestamp"}, ...]}
+    -> 200: {"runUuid", "inserted"} -- inserted is false if this runUuid
+             was already synced (idempotent replay, not a failure)
+    -> 400: missing/invalid field, or trace over MAX_TRACE_POINTS
+    -> 401: missing/invalid X-API-Key
+    -> 429: rate limit exceeded
+
+    GET /runs?deviceId=...  (rate limit: 20/min per IP) -- all runs
+    synced under one device id, most recent first. What the mobile
+    client's Past Runs screen merges with its own local list.
+    -> 200: {"runs": [...]}  -- same per-run shape as POST /runs' body,
+             plus nothing else (no server-only fields to leak)
+    -> 400: missing/invalid deviceId
+    -> 401: missing/invalid X-API-Key
+    -> 429: rate limit exceeded
+
 Usage:
     python3 scripts/route_api.py
     curl -X POST http://localhost:5001/route \
@@ -109,6 +138,13 @@ from closures import (
     store_closure,
 )
 from cities import resolve_city
+from runs import (
+    MAX_DEVICE_ID_LEN,
+    MAX_TRACE_POINTS,
+    ensure_schema as ensure_runs_schema,
+    get_runs_for_device,
+    store_run,
+)
 
 # Pre-deployment hardening (§4/§7, "is this safe to expose on the public
 # internet" review) -- see that review's own notes for the reasoning
@@ -136,6 +172,7 @@ if not API_KEY:
 
 app = Flask(__name__)
 ensure_schema()
+ensure_runs_schema()
 
 # In-memory storage is fine at this scale (a single-process small beta,
 # not a fleet behind a load balancer) -- see the hardening review. Limits
@@ -315,6 +352,55 @@ def resolve_closure_route(closure_id):
         # different problems.
         return jsonify({"error": "invalid resolve_token for this closure"}), 403
     return jsonify({"id": closure_id, "status": "resolved"})
+
+
+@app.route("/runs", methods=["POST"])
+@limiter.limit("20 per minute")
+@require_api_key
+def sync_run():
+    body = request.get_json(silent=True) or {}
+
+    device_id = body.get("deviceId")
+    run_uuid = body.get("runUuid")
+    if not isinstance(device_id, str) or not device_id or len(device_id) > MAX_DEVICE_ID_LEN:
+        return jsonify({"error": f"deviceId (string, 1-{MAX_DEVICE_ID_LEN} chars) is required"}), 400
+    if not isinstance(run_uuid, str) or not run_uuid:
+        return jsonify({"error": "runUuid (string) is required"}), 400
+
+    try:
+        started_at = str(body["startedAt"])
+        target_distance_m = float(body["targetDistanceM"])
+        actual_distance_m = float(body["actualDistanceM"])
+        duration_ms = int(body["durationMs"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "startedAt, targetDistanceM, actualDistanceM, durationMs are required"}), 400
+
+    trace = body.get("trace")
+    if not isinstance(trace, list):
+        return jsonify({"error": "trace (array) is required"}), 400
+    # Independent of rate limiting -- see runs.py's MAX_TRACE_POINTS
+    # comment -- a single oversized trace is a per-request resource cost,
+    # not something request-volume throttling protects against.
+    if len(trace) > MAX_TRACE_POINTS:
+        return jsonify({"error": f"trace must have at most {MAX_TRACE_POINTS} points"}), 400
+
+    inserted = store_run(device_id, run_uuid, started_at, target_distance_m,
+                          actual_distance_m, duration_ms, trace)
+    # 200 either way -- syncing a run that's already synced (e.g. a
+    # retried request after a flaky connection) is a successful no-op,
+    # not an error; `inserted` distinguishes the two for a caller that
+    # cares, without treating the idempotent case as a failure.
+    return jsonify({"runUuid": run_uuid, "inserted": inserted}), 200
+
+
+@app.route("/runs", methods=["GET"])
+@limiter.limit("20 per minute")
+@require_api_key
+def list_runs():
+    device_id = request.args.get("deviceId", "")
+    if not device_id or len(device_id) > MAX_DEVICE_ID_LEN:
+        return jsonify({"error": f"deviceId query parameter (1-{MAX_DEVICE_ID_LEN} chars) is required"}), 400
+    return jsonify({"runs": get_runs_for_device(device_id)})
 
 
 @app.route("/health", methods=["GET"])

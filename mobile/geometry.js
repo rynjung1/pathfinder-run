@@ -12,6 +12,10 @@
 //
 // No behavior changes from moving this code -- App.js now imports these
 // from here instead of defining them locally.
+//
+// mergeRunHistory, below, isn't geometry, but lives here for the same
+// reason: it's pure (no fetch, no SQLite), previously inline in App.js's
+// openHistory where it wasn't unit-testable on its own.
 
 // Local flat-plane projection centered on `origin`, in meters. Accurate
 // enough at the scale this is used for (a deviation check over tens to a
@@ -98,4 +102,19 @@ export function formatDuration(ms) {
 
 export function formatDistance(meters) {
   return `${(meters / 1000).toFixed(2)} km`;
+}
+
+// Combines a device's local run history with its server-synced copy for
+// display (App.js's openHistory) -- local is always authoritative and
+// kept as-is; a server run only gets added if its runUuid isn't already
+// present locally (sync only ever pushes local -> server today, so this
+// normally adds nothing, but see openHistory's own comment for the
+// narrower case it does cover, and why this is still worth having).
+// Returns a new array, most-recent-first; does not mutate either input.
+export function mergeRunHistory(localRuns, serverRuns) {
+  const localUuids = new Set(localRuns.map((r) => r.runUuid).filter(Boolean));
+  const serverOnly = serverRuns.filter((r) => !localUuids.has(r.runUuid));
+  return [...localRuns, ...serverOnly].sort(
+    (a, b) => new Date(b.startedAt) - new Date(a.startedAt)
+  );
 }

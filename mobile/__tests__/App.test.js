@@ -26,6 +26,7 @@ jest.mock('expo-location', () => ({
 jest.mock('../db', () => ({
   getRuns: jest.fn(() => Promise.resolve([])),
   saveRun: jest.fn(() => Promise.resolve(1)),
+  getOrCreateDeviceId: jest.fn(() => Promise.resolve('test-device-id')),
 }));
 
 import App from '../App';

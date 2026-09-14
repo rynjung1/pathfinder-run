@@ -1,8 +1,11 @@
 import * as SQLite from 'expo-sqlite';
 
 // Pathfinder Run -- local run-history storage, §2's "cached routes, run
-// history" local store. Local-only for now, deliberately -- no server
-// sync yet, that's a separate later step once this proves useful.
+// history" local store. Now with an optional server-side sync copy (see
+// getOrCreateDeviceId below and App.js's syncRunToServer) -- still
+// entirely usable local-only if sync fails or is never attempted; the
+// local copy here is always the authoritative one, sync is best-effort
+// on top of it, not a replacement for it.
 //
 // expo-sqlite over AsyncStorage+JSON: investigated before implementing,
 // same as every other storage decision this session. AsyncStorage keeps
@@ -27,10 +30,34 @@ import * as SQLite from 'expo-sqlite';
 // everywhere else in this project (§0). Revisit if/when run history grows
 // large enough that loading full traces just to list dates/distances
 // becomes a real cost.
+//
+// run_uuid: a client-generated id assigned per run (see saveRun), used
+// as the sync idempotency key against the server (scripts/runs.py's
+// store_run) -- generated locally, before a run is even known to sync
+// successfully, so a retried sync after a flaky connection doesn't
+// create a duplicate server-side row. Migrated in via ALTER TABLE for
+// installs that already have the runs table from before this existed
+// (see ensureRunUuidColumn) rather than assuming a fresh CREATE TABLE
+// always runs -- this app has been through enough schema changes this
+// session (closures.py's resolve_token column being the precedent) that
+// "assume every install is fresh" is already known to be wrong.
+//
+// device table: exactly one row (id fixed to 1 via CHECK), holding the
+// random device id used for server-side sync -- see getOrCreateDeviceId
+// and runs.py's module docstring for the identity model and its honest
+// limits (does not survive an app reinstall).
 
 const DB_NAME = 'pathfinder_run.db';
 
 let dbPromise = null;
+
+async function ensureRunUuidColumn(db) {
+  const columns = await db.getAllAsync('PRAGMA table_info(runs)');
+  const hasRunUuid = columns.some((c) => c.name === 'run_uuid');
+  if (!hasRunUuid) {
+    await db.execAsync('ALTER TABLE runs ADD COLUMN run_uuid TEXT');
+  }
+}
 
 function getDb() {
   if (!dbPromise) {
@@ -44,23 +71,59 @@ function getDb() {
           duration_ms INTEGER NOT NULL,
           trace TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS device (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          device_id TEXT NOT NULL
+        );
       `);
+      await ensureRunUuidColumn(db);
       return db;
     });
   }
   return dbPromise;
 }
 
-// Insert one completed run. Returns the new row's id.
-export async function saveRun({ startedAt, targetDistanceM, actualDistanceM, durationMs, trace }) {
+// A device id sufficiently unique for its actual purpose (identifying
+// which device's runs are which for sync, nothing security-sensitive --
+// unlike closures.py's resolve_token, which genuinely needs to be
+// unguessable), generated with Math.random() rather than crypto.randomUUID()
+// specifically to avoid depending on Hermes's current level of Web Crypto
+// support -- not worth checking version-specific availability for an id
+// with this low a quality bar. Timestamp prefix + two random chunks is
+// comfortably collision-free at this app's actual scale.
+function generateDeviceId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Returns this install's device id, creating and persisting one on first
+// call if none exists yet. See this file's header and runs.py's module
+// docstring: this does NOT survive an app uninstall/reinstall (it lives
+// in the same local database as the run history it's meant to help sync)
+// -- a known, accepted limitation, not an oversight.
+export async function getOrCreateDeviceId() {
+  const db = await getDb();
+  const existing = await db.getFirstAsync('SELECT device_id FROM device WHERE id = 1');
+  if (existing) return existing.device_id;
+
+  const deviceId = generateDeviceId();
+  await db.runAsync('INSERT INTO device (id, device_id) VALUES (1, ?)', deviceId);
+  return deviceId;
+}
+
+// Insert one completed run. Returns the new row's id. Callers should
+// generate runUuid themselves (see App.js) before calling this, the same
+// value used for the server sync attempt right after -- both need to
+// agree on it for sync idempotency to mean anything.
+export async function saveRun({ startedAt, targetDistanceM, actualDistanceM, durationMs, trace, runUuid }) {
   const db = await getDb();
   const result = await db.runAsync(
-    'INSERT INTO runs (started_at, target_distance_m, actual_distance_m, duration_ms, trace) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO runs (started_at, target_distance_m, actual_distance_m, duration_ms, trace, run_uuid) VALUES (?, ?, ?, ?, ?, ?)',
     startedAt,
     targetDistanceM,
     actualDistanceM,
     durationMs,
-    JSON.stringify(trace)
+    JSON.stringify(trace),
+    runUuid
   );
   return result.lastInsertRowId;
 }
@@ -78,5 +141,6 @@ export async function getRuns() {
     actualDistanceM: row.actual_distance_m,
     durationMs: row.duration_ms,
     trace: JSON.parse(row.trace),
+    runUuid: row.run_uuid,
   }));
 }

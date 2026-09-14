@@ -15,7 +15,7 @@ v1 and v2 core scope (see [`docs/running-app-architecture.md`](docs/running-app-
 - Mobile client: request a route, choose between the 2-3 generated alternatives, view the chosen one on a map (`mobile/App.js`).
 - Live GPS tracking during a run, with on-device deviation detection.
 - Crowdsourced closure reporting, matched to OSM edges and fed into the routing cost (`scripts/closures.py`).
-- Local run history, including replay of a past run's actual recorded GPS trace on a map (`mobile/db.js`).
+- Run history: local SQLite storage, replay of a past run's actual recorded GPS trace on a map, and a best-effort device-scoped sync to the server for durability (`mobile/db.js`, `scripts/runs.py`) — no user accounts, so this doesn't survive an app reinstall; see `runs.py`'s module docstring for the honest scope.
 
 Also done: a pre-deployment hardening pass (API-key auth, per-IP rate limiting, input caps, a production WSGI server — `scripts/route_api.py`, `scripts/serve.py`). Actual VPS deployment hasn't happened yet — it's blocked on a domain (HTTPS needs one; see [`deploy/README.md`](deploy/README.md) for the concrete, ready-to-run plan). v3 (background/`Always` location) is a deliberate not-yet, not an oversight — see the file header of `mobile/App.js` for why.
 
@@ -24,7 +24,7 @@ Also done: a pre-deployment hardening pass (API-key auth, per-IP rate limiting, 
 - **Routing engine:** [GraphHopper](https://www.graphhopper.com/) (self-hosted) with a custom pedestrian profile, against raw OSM data.
 - **Storage:** SQLite, not PostGIS — deliberate, not a placeholder. See the reasoning in [`scripts/closures.py`](scripts/closures.py)'s module docstring (search for "Storage: SQLite, not PostGIS").
 - **Backend API:** Python/Flask (`scripts/route_api.py`), served via [waitress](https://github.com/Pylons/waitress) in production (`scripts/serve.py`).
-- **Mobile:** React Native via [Expo](https://expo.dev/) (`mobile/`), with local run history in SQLite via `expo-sqlite` (`mobile/db.js`).
+- **Mobile:** React Native via [Expo](https://expo.dev/) (`mobile/`), with local run history in SQLite via `expo-sqlite` (`mobile/db.js`), synced to the server (`scripts/runs.py`, device-scoped, no accounts) on a best-effort basis.
 
 ## Setup
 

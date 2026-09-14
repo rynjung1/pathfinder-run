@@ -13,6 +13,7 @@ import {
   formatDistance,
   formatDuration,
   haversineMeters,
+  mergeRunHistory,
   pointToSegmentDistance,
   projectToLocalMeters,
   traceDistanceMeters,
@@ -186,4 +187,43 @@ test('formatDistance: renders kilometers to 2 decimal places', () => {
   expect(formatDistance(5000)).toBe('5.00 km');
   expect(formatDistance(1234)).toBe('1.23 km');
   expect(formatDistance(0)).toBe('0.00 km');
+});
+
+// --- mergeRunHistory ---------------------------------------------------
+
+test('mergeRunHistory: server runs already present locally (by runUuid) are not duplicated', () => {
+  const local = [{ runUuid: 'a', startedAt: '2026-09-14T00:00:00Z' }];
+  const server = [{ runUuid: 'a', startedAt: '2026-09-14T00:00:00Z' }];
+  expect(mergeRunHistory(local, server)).toEqual(local);
+});
+
+test('mergeRunHistory: a server-only run gets added', () => {
+  const local = [{ runUuid: 'a', startedAt: '2026-09-14T01:00:00Z' }];
+  const server = [{ runUuid: 'b', startedAt: '2026-09-14T00:00:00Z' }];
+  const result = mergeRunHistory(local, server);
+  expect(result.map((r) => r.runUuid)).toEqual(['a', 'b']);
+});
+
+test('mergeRunHistory: result is sorted most-recent-first regardless of input order', () => {
+  const local = [{ runUuid: 'older', startedAt: '2026-09-14T00:00:00Z' }];
+  const server = [{ runUuid: 'newer', startedAt: '2026-09-14T02:00:00Z' }];
+  const result = mergeRunHistory(local, server);
+  expect(result.map((r) => r.runUuid)).toEqual(['newer', 'older']);
+});
+
+test('mergeRunHistory: does not mutate its inputs', () => {
+  const local = [{ runUuid: 'a', startedAt: '2026-09-14T00:00:00Z' }];
+  const server = [{ runUuid: 'b', startedAt: '2026-09-14T01:00:00Z' }];
+  const localCopy = [...local];
+  const serverCopy = [...server];
+  mergeRunHistory(local, server);
+  expect(local).toEqual(localCopy);
+  expect(server).toEqual(serverCopy);
+});
+
+test('mergeRunHistory: local runs with no runUuid (pre-migration rows) are kept, never treated as duplicates', () => {
+  const local = [{ id: 1, runUuid: null, startedAt: '2026-09-14T00:00:00Z' }];
+  const server = [{ runUuid: 'b', startedAt: '2026-09-14T01:00:00Z' }];
+  const result = mergeRunHistory(local, server);
+  expect(result).toHaveLength(2);
 });
