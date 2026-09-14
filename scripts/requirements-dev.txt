@@ -1,0 +1,7 @@
+# Test-only dependencies -- separate from requirements.txt so the
+# production VPS install (deploy/README.md) doesn't pull in a test
+# runner it never needs.
+#
+# Install: pip install -r requirements.txt -r requirements-dev.txt
+# Run:     cd scripts && pytest
+pytest==9.0.2
