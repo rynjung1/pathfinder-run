@@ -109,7 +109,22 @@ import {
 // backend has a domain (deploy/README.md) -- unset (the common case today),
 // this still defaults to the same localhost value it always used.
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:5001';
-const TARGET_DISTANCE_M = 5000;
+
+// Was a single hardcoded constant with no UI to change it -- found on a
+// UI/UX sweep, and a genuinely significant gap: the app's own pitch (this
+// file's header, the README, docs/running-app-architecture.md §1) is
+// "give it a distance, and it builds a route," but there was no actual
+// way to give it one -- every route was silently exactly 5km, forever.
+// route_api.py already fully supports any distance up to MAX_DISTANCE_M
+// (30km, see that file) -- this was purely a missing client-side control,
+// not a backend limitation. DEFAULT_TARGET_DISTANCE_M seeds targetDistanceM
+// (state, below) so the existing "auto-generate a route on launch"
+// convenience is unchanged; DISTANCE_PRESETS_M drives the picker shown
+// once a route exists (see the 'ready' state's render) -- plain preset
+// buttons, not a slider/numeric input, to match this app's existing
+// all-stock-Button UI and avoid a new native dependency for this.
+const DEFAULT_TARGET_DISTANCE_M = 5000;
+const DISTANCE_PRESETS_M = [3000, 5000, 8000, 10000];
 
 // route_api.py's pre-deployment hardening pass added a required X-API-Key
 // header (see that commit's route_api.py docstring) but this client was
@@ -240,6 +255,9 @@ export default function App() {
   // default, so a user who never taps an alternate sees the same route this
   // screen always showed.
   const [candidates, setCandidates] = useState(null);
+  // See DEFAULT_TARGET_DISTANCE_M/DISTANCE_PRESETS_M above -- this is the
+  // one place "how far" actually lives now, instead of a fixed constant.
+  const [targetDistanceM, setTargetDistanceM] = useState(DEFAULT_TARGET_DISTANCE_M);
   const [selectedCandidateIndex, setSelectedCandidateIndex] = useState(0);
   const [startCoord, setStartCoord] = useState(null);
   const [liveCoord, setLiveCoord] = useState(null);
@@ -361,7 +379,14 @@ export default function App() {
     }
   }, [replayMapReady, selectedRun]);
 
-  async function generateRoute() {
+  // distanceOverride: passed directly by selectDistance below, rather than
+  // relying on targetDistanceM state -- setTargetDistanceM's update isn't
+  // visible in this same call's closure yet (React state updates aren't
+  // synchronous), so reading targetDistanceM right after setting it here
+  // would still see the OLD value for this request.
+  async function generateRoute(distanceOverride) {
+    const distance = distanceOverride ?? targetDistanceM;
+    setTargetDistanceM(distance);
     setSessionState('generating');
     setCandidates(null);
     setSelectedCandidateIndex(0);
@@ -381,7 +406,7 @@ export default function App() {
       const response = await fetch(`${API_BASE_URL}/route`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
-        body: JSON.stringify({ lat: latitude, lon: longitude, distance: TARGET_DISTANCE_M }),
+        body: JSON.stringify({ lat: latitude, lon: longitude, distance }),
       });
       const body = await response.json();
       if (!response.ok) {
@@ -421,6 +446,10 @@ export default function App() {
       Alert.alert('Could not generate route', String(err.message || err));
       setSessionState('idle');
     }
+  }
+
+  function selectDistance(meters) {
+    generateRoute(meters);
   }
 
   // The actual per-position handling, pulled out of the watchPositionAsync
@@ -613,7 +642,7 @@ export default function App() {
     const mapSnapshotUri = await captureRunSnapshot(runUuidRef.current);
     const run = {
       startedAt: timing.startedAt,
-      targetDistanceM: TARGET_DISTANCE_M,
+      targetDistanceM,
       actualDistanceM: traceDistanceMeters(trace),
       durationMs: timing.activeMs,
       trace,
@@ -1021,7 +1050,12 @@ export default function App() {
       <View style={styles.controls}>
         {sessionState === 'generating' && <ActivityIndicator size="large" />}
         {sessionState === 'idle' && (
-          <Button title="Generate 5km route from here" onPress={generateRoute} />
+          // onPress={() => generateRoute()}, not onPress={generateRoute} --
+          // Button's onPress hands its GestureResponderEvent as the first
+          // argument, which generateRoute would otherwise take as a truthy
+          // distanceOverride instead of falling back to targetDistanceM
+          // state. Same reasoning below for Regenerate.
+          <Button title={`Generate ${targetDistanceM / 1000}km route from here`} onPress={() => generateRoute()} />
         )}
         {sessionState === 'ready' && (
           <>
@@ -1031,8 +1065,26 @@ export default function App() {
                 Selected: #{selectedCandidate.rank} ({formatDistance(selectedCandidate.distanceM)})
               </Text>
             )}
+            {/* §1's own pitch is "give it a distance" -- this is the one
+                place that's actually possible now, instead of a silent
+                fixed 5km forever. Tapping a preset regenerates at that
+                distance immediately, same as Regenerate but at a new
+                target -- see DISTANCE_PRESETS_M/selectDistance above. */}
             <View style={styles.buttonRow}>
-              <Button title="Regenerate" onPress={generateRoute} />
+              {DISTANCE_PRESETS_M.map((meters) => (
+                <TouchableOpacity
+                  key={meters}
+                  onPress={() => selectDistance(meters)}
+                  style={[styles.distanceChip, meters === targetDistanceM && styles.distanceChipSelected]}
+                >
+                  <Text style={[styles.distanceChipText, meters === targetDistanceM && styles.distanceChipTextSelected]}>
+                    {meters / 1000}km
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.buttonRow}>
+              <Button title="Regenerate" onPress={() => generateRoute()} />
               <Button title="Start Run" onPress={handleStart} />
             </View>
           </>
@@ -1126,6 +1178,24 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#2E7D32',
     marginBottom: 10,
+  },
+  distanceChip: {
+    borderWidth: 1,
+    borderColor: '#2E7D32',
+    borderRadius: 16,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    marginBottom: 10,
+  },
+  distanceChipSelected: {
+    backgroundColor: '#2E7D32',
+  },
+  distanceChipText: {
+    color: '#2E7D32',
+    fontWeight: '600',
+  },
+  distanceChipTextSelected: {
+    color: '#fff',
   },
   reportRow: {
     marginTop: 8,

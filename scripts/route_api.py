@@ -131,6 +131,8 @@ import functools
 import os
 import secrets
 import sys
+import urllib.error
+import urllib.request
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -152,7 +154,7 @@ from closures import (
     snap_to_way_id,
     store_closure,
 )
-from cities import resolve_city
+from cities import CITIES, resolve_city
 from runs import (
     MAX_DEVICE_ID_LEN,
     MAX_TRACE_POINTS,
@@ -442,7 +444,46 @@ def delete_runs():
 
 
 @app.route("/health", methods=["GET"])
+# Every other endpoint here is rate-limited; /health had no need to be
+# (a static response, zero work) until the change below gave it a real
+# per-request cost: an outbound network call to GraphHopper. Unauthenticated
+# AND uncapped would make it a free way to repeatedly trigger that call --
+# a real resource-consumption angle this same commit would otherwise have
+# introduced, not a pre-existing gap. Capped higher than the write
+# endpoints below (60 vs 20-30/min) since legitimate monitoring/uptime
+# checks poll health endpoints more often than a user calls /route.
+@limiter.limit("60 per minute")
 def health():
+    """Was an unconditional {"status": "ok"} -- found on a backend sweep,
+    and a real gap: a health check that can never report unhealthy doesn't
+    actually check anything. If GraphHopper is down (crashed, still
+    importing, wedged the way config-ontario.yml's routing.timeout_ms
+    comment describes), /route already 502s/times out for every real
+    request, but this endpoint would keep reporting "ok" regardless --
+    exactly backwards for what deploy/README.md's own install steps use
+    this for (step 6 waits on GraphHopper's OWN /health before starting
+    this API; nothing was checking that the two stayed connected
+    afterward, e.g. after GraphHopper restarts independently for any
+    reason).
+
+    Now actually checks reachability of every configured region's
+    GraphHopper (CITIES, cities.py -- one entry today, but not hardcoded
+    to that), with a short timeout so a slow/wedged GraphHopper fails this
+    check fast rather than hanging it too. 503 (not 200) when any region
+    is unreachable -- the conventional signal for a monitoring tool or
+    load balancer to treat this instance as unhealthy, which "ok" never
+    could regardless of what it found.
+    """
+    unreachable = []
+    for city in CITIES:
+        try:
+            with urllib.request.urlopen(f"{city['base_url']}/health", timeout=3):
+                pass
+        except (urllib.error.URLError, TimeoutError, OSError):
+            unreachable.append(city["name"])
+
+    if unreachable:
+        return jsonify({"status": "degraded", "unreachable_graphhopper_regions": unreachable}), 503
     return jsonify({"status": "ok"})
 
 

@@ -86,7 +86,11 @@ via `run-graphhopper.sh`; the custom code only ever runs at import time.
 5. `sudo cp deploy/pathfinder-*.service /etc/systemd/system/ && sudo systemctl daemon-reload`
 6. `sudo systemctl enable --now pathfinder-graphhopper`, wait for it to
    report healthy (`curl localhost:8995/health`) before starting the API.
-7. `sudo systemctl enable --now pathfinder-route-api`
+7. `sudo systemctl enable --now pathfinder-route-api`, then `curl
+   localhost:5001/health` -- this checks GraphHopper connectivity too
+   (503 + `{"status": "degraded", ...}` if it can't reach it), not just
+   "the process started," so it's worth checking again any time
+   GraphHopper restarts independently of this service.
 8. Firewall: allow only 22 (SSH) and 443 (HTTPS, once Caddy is in front)
    inbound. Nothing else -- GraphHopper (8995/8996) and route_api.py
    (127.0.0.1:5001) are both intentionally not internet-reachable

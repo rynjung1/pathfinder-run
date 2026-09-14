@@ -163,6 +163,36 @@ test('tapping an alternate route selects it and updates the displayed distance',
   expect(screen.queryByText(/Selected: #1/)).toBeNull();
 });
 
+test('picking a distance preset regenerates the route requesting that exact distance', async () => {
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  // The default 5km request from the auto-generate-on-launch effect.
+  const initialRouteCalls = global.fetch.mock.calls.filter(([url]) => url.endsWith('/route'));
+  expect(initialRouteCalls).toHaveLength(1);
+  expect(JSON.parse(initialRouteCalls[0][1].body)).toMatchObject({ distance: 5000 });
+
+  fireEvent.press(screen.getByText('8km'));
+
+  // mockRouteResponse's candidates are the same regardless of the
+  // requested distance -- what this test cares about is the REQUEST,
+  // not a different response, so waiting for the route to re-settle
+  // (back to "Selected: #1") is enough before checking what was asked for.
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  const routeCalls = global.fetch.mock.calls.filter(([url]) => url.endsWith('/route'));
+  expect(routeCalls).toHaveLength(2);
+  expect(JSON.parse(routeCalls[1][1].body)).toMatchObject({ distance: 8000 });
+
+  // Picking a different preset afterward requests THAT distance, not the
+  // original default -- confirms the choice is sticky (targetDistanceM
+  // state), not reset back to 5km on every regenerate.
+  fireEvent.press(screen.getByText('3km'));
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  const finalCalls = global.fetch.mock.calls.filter(([url]) => url.endsWith('/route'));
+  expect(finalCalls).toHaveLength(3);
+  expect(JSON.parse(finalCalls[2][1].body)).toMatchObject({ distance: 3000 });
+});
+
 test('Delete All My Data clears local runs and calls the server DELETE endpoint', async () => {
   // Alert.alert is a native modal Jest can't render -- stand in for the
   // user tapping "Delete" by invoking that button's onPress directly,
