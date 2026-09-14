@@ -69,4 +69,6 @@ Not done yet — see [`deploy/README.md`](deploy/README.md) for the concrete pla
 
 ## License
 
-_TBD_
+All rights reserved. No open-source license is granted — this is the
+legal default with no `LICENSE` file present, stated explicitly here
+rather than left as an unresolved placeholder.
