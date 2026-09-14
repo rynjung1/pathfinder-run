@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "mobile",
-    "slug": "mobile",
+    "name": "Pathfinder Run",
+    "slug": "pathfinder-run",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -11,11 +11,24 @@
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Pathfinder Run uses your current location to generate a running route starting from where you are."
       },
-      "bundleIdentifier": "com.rynjung.mobile"
+      "bundleIdentifier": "com.rynjung.pathfinderrun",
+      "privacyManifests": {
+        "NSPrivacyCollectedDataTypes": [
+          {
+            "NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypePreciseLocation",
+            "NSPrivacyCollectedDataTypeLinked": true,
+            "NSPrivacyCollectedDataTypeTracking": false,
+            "NSPrivacyCollectedDataTypePurposes": [
+              "NSPrivacyCollectedDataTypePurposeAppFunctionality"
+            ]
+          }
+        ]
+      }
     },
     "android": {
+      "package": "com.rynjung.pathfinderrun",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#2E7D32",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"

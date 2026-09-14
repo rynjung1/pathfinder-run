@@ -3,7 +3,7 @@ import { StyleSheet, Text, View, Button, ActivityIndicator, Alert, Platform, Fla
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import MapView, { Polyline, Marker } from 'react-native-maps';
-import { saveRun, getRuns, getOrCreateDeviceId } from './db';
+import { saveRun, getRuns, getOrCreateDeviceId, deleteAllRuns } from './db';
 import {
   distanceToRouteMeters,
   formatDistance,
@@ -36,6 +36,13 @@ import {
 // short of an app reinstall, NOT a guarantee your history survives
 // reinstalling the app (the device id lives in the same local database as
 // the history it's meant to back up).
+//
+// Also here: "Delete All My Data" (deleteAllData, on the Past Runs
+// screen) -- a real, working deletion, not a support-ticket process
+// (§3's user-facing-controls requirement). Clears local storage and, if
+// synced, the server-side copy for this device too -- there's no
+// separate "delete my account" since device-scoped sync IS the account
+// data in this app's no-login model.
 //
 // Deliberately NOT here yet:
 // - Rerouting once a deviation is detected -- detection + a UI indicator
@@ -183,6 +190,7 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [pastRuns, setPastRuns] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [deletingData, setDeletingData] = useState(false);
   // Which past run's replay is showing, or null for the plain list --
   // §2's "route replay-on-map for a past run." Holds the whole run record
   // (including its trace) from pastRuns, not just an id, since the list is
@@ -518,6 +526,62 @@ export default function App() {
     setSelectedRun(null);
   }
 
+  // "Delete my data" (§3's user-facing-controls requirement: a real
+  // working button, not a support-ticket process). Clears BOTH stores --
+  // local (always authoritative) and, if a device id exists, this
+  // device's server-synced copy too (DELETE /runs, scripts/route_api.py)
+  // -- there's no separate "delete my account" action, since this app's
+  // device-scoped identity model (no login) means the synced runs ARE
+  // the account data; see runs.py's module docstring. Confirmed first via
+  // Alert, the standard React Native confirmation pattern for a
+  // destructive action -- not the browser dialogs this project avoids
+  // elsewhere, which are a different (blocking, non-native) mechanism.
+  function deleteAllData() {
+    Alert.alert(
+      'Delete all my data?',
+      'This permanently deletes your run history from this device and, if synced, from the server. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setDeletingData(true);
+            try {
+              await deleteAllRuns();
+              try {
+                const deviceId = await getOrCreateDeviceId();
+                const response = await fetch(`${API_BASE_URL}/runs`, {
+                  method: 'DELETE',
+                  headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+                  body: JSON.stringify({ deviceId }),
+                });
+                if (!response.ok) {
+                  const body = await response.json().catch(() => ({}));
+                  throw new Error(body.error || `route_api returned ${response.status}`);
+                }
+              } catch (err) {
+                // Local deletion already succeeded and is the part that
+                // matters most -- surfaced so the user knows the server
+                // copy may still exist, but not treated as a fatal
+                // failure of the overall action.
+                Alert.alert(
+                  'Local data deleted',
+                  `Your local run history was deleted, but the server copy could not be reached: ${err.message || err}. Try again to fully clear the server-synced copy.`
+                );
+              }
+              setPastRuns([]);
+            } catch (err) {
+              Alert.alert('Could not delete data', String(err.message || err));
+            } finally {
+              setDeletingData(false);
+            }
+          },
+        },
+      ]
+    );
+  }
+
   // Tapping a row in the past-runs list -- shows that run's actual
   // recorded trace on a map (see the replayMapReady effect above), not the
   // originally-generated route (that's not what's captured/stored; the
@@ -624,6 +688,13 @@ export default function App() {
             )}
           />
         )}
+        <View style={styles.deleteDataRow}>
+          {deletingData ? (
+            <ActivityIndicator size="small" />
+          ) : (
+            <Button title="Delete All My Data" color="#B00020" onPress={deleteAllData} />
+          )}
+        </View>
         <StatusBar style="auto" />
       </View>
     );
@@ -810,6 +881,11 @@ const styles = StyleSheet.create({
   },
   historyLoading: {
     marginTop: 24,
+  },
+  deleteDataRow: {
+    padding: 16,
+    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
+    alignItems: 'center',
   },
   runRow: {
     paddingHorizontal: 16,

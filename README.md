@@ -69,6 +69,17 @@ See `mobile/App.js`'s file header for the `API_BASE_URL` addressing notes (Simul
 
 Not done yet — see [`deploy/README.md`](deploy/README.md) for the concrete plan (systemd units, layout, what's blocked and on what).
 
+### App Store readiness
+
+Beyond backend deployment, submitting to the App Store/Play Store needs:
+- **Apple Developer Program enrollment** ($99/year) and an App Store Connect account — not something code can do, needs to happen directly.
+- **A reachable production backend** — a release build can't point at `localhost`; this is the same VPS/domain blocker as backend deployment above.
+- **Privacy policy**: drafted and published — https://claude.ai/code/artifact/b1f491f0-5c0c-4454-8c93-17ca88adf517 — describes the app's actual data handling (location, run history, device-scoped sync, deletion). Needs a real contact email filled in (currently a placeholder) before submission, and to be pasted into App Store Connect's/Play Console's privacy policy URL fields.
+- **Privacy Manifest** (`mobile/app.json`'s `ios.privacyManifests`): declares precise-location collection accurately — was previously the stock Expo default declaring zero collected data types despite the app collecting and syncing location, now fixed.
+- **App identity**: real name ("Pathfinder Run", was "mobile") and a real icon (`mobile/assets/generate_icons.py` — was the unmodified Expo template default) — both fixed.
+- **Delete-my-data**: a real, working "Delete All My Data" button (Past Runs screen) clearing both local and server-synced data — required by app store review and by the privacy policy above; was missing entirely, now built.
+- **`eas.json` / a release build pipeline**: not set up yet.
+
 ## License
 
 All rights reserved. No open-source license is granted — this is the

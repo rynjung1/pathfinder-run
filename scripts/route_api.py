@@ -100,6 +100,21 @@ Endpoints:
     -> 401: missing/invalid X-API-Key
     -> 429: rate limit exceeded
 
+    DELETE /runs  (rate limit: 20/min per IP) -- "delete my data" (§3's
+    user-facing-controls requirement). A real delete, not a status flip
+    -- see closures.py's resolve/expire for why THOSE are soft, and
+    runs.py's delete_runs_for_device for why this one isn't. This is the
+    account-data deletion too, not a separate mechanism: there's no
+    account in this app's device-scoped identity model (see runs.py's
+    module docstring), so deleting a device_id's rows here deletes
+    everything the server holds that's identifiable to that device.
+    body: {"deviceId": "..."}
+    -> 200: {"deviceId", "deletedCount"}  -- deletedCount is 0, not an
+             error, if that device had no synced runs
+    -> 400: missing/invalid deviceId
+    -> 401: missing/invalid X-API-Key
+    -> 429: rate limit exceeded
+
 Usage:
     python3 scripts/route_api.py
     curl -X POST http://localhost:5001/route \
@@ -141,6 +156,7 @@ from cities import resolve_city
 from runs import (
     MAX_DEVICE_ID_LEN,
     MAX_TRACE_POINTS,
+    delete_runs_for_device,
     ensure_schema as ensure_runs_schema,
     get_runs_for_device,
     store_run,
@@ -401,6 +417,28 @@ def list_runs():
     if not device_id or len(device_id) > MAX_DEVICE_ID_LEN:
         return jsonify({"error": f"deviceId query parameter (1-{MAX_DEVICE_ID_LEN} chars) is required"}), 400
     return jsonify({"runs": get_runs_for_device(device_id)})
+
+
+@app.route("/runs", methods=["DELETE"])
+@limiter.limit("20 per minute")
+@require_api_key
+def delete_runs():
+    # "Delete my data," §3's user-facing-controls requirement -- a real
+    # working endpoint, not a support-ticket process. deviceId in the body
+    # (not a query param, unlike GET) since this is the destructive
+    # counterpart and a body is the more conventional place for a DELETE
+    # request's identifying payload; still only ever deletes the calling
+    # device's own rows, there's no way to target another device's data
+    # (device_id isn't a secret, but it's also not treated as one here --
+    # anyone syncing under a given id can delete it, the same as they can
+    # already read it via GET, which is the accepted shape of this
+    # no-accounts identity model -- see runs.py's module docstring).
+    body = request.get_json(silent=True) or {}
+    device_id = body.get("deviceId", "")
+    if not device_id or len(device_id) > MAX_DEVICE_ID_LEN:
+        return jsonify({"error": f"deviceId (1-{MAX_DEVICE_ID_LEN} chars) is required in the request body"}), 400
+    deleted = delete_runs_for_device(device_id)
+    return jsonify({"deviceId": device_id, "deletedCount": deleted})
 
 
 @app.route("/health", methods=["GET"])

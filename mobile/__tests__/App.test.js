@@ -13,6 +13,7 @@
  * GraphHopper instance or SQLite/location hardware.
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 jest.mock('expo-location', () => ({
   Accuracy: { BestForNavigation: 6 }, // App.js only references this by name at module load, value is irrelevant here
@@ -27,9 +28,11 @@ jest.mock('../db', () => ({
   getRuns: jest.fn(() => Promise.resolve([])),
   saveRun: jest.fn(() => Promise.resolve(1)),
   getOrCreateDeviceId: jest.fn(() => Promise.resolve('test-device-id')),
+  deleteAllRuns: jest.fn(() => Promise.resolve()),
 }));
 
 import App from '../App';
+import { deleteAllRuns } from '../db';
 
 // Three distinct, real-shaped candidates, matching exactly what
 // route_api.py's candidates_to_geojson actually returns (see App.js's
@@ -91,4 +94,27 @@ test('tapping an alternate route selects it and updates the displayed distance',
   await waitFor(() => screen.getByText(/Selected: #2/));
   expect(screen.getByText(/3\.02 km/)).toBeTruthy(); // rank 2's 3015.65m
   expect(screen.queryByText(/Selected: #1/)).toBeNull();
+});
+
+test('Delete All My Data clears local runs and calls the server DELETE endpoint', async () => {
+  // Alert.alert is a native modal Jest can't render -- stand in for the
+  // user tapping "Delete" by invoking that button's onPress directly,
+  // the standard RN Testing Library pattern for confirmation dialogs.
+  jest.spyOn(Alert, 'alert').mockImplementation((title, message, buttons) => {
+    buttons.find((b) => b.text === 'Delete').onPress();
+  });
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  fireEvent.press(screen.getByText('Past Runs'));
+  await waitFor(() => screen.getByText('Delete All My Data'));
+  fireEvent.press(screen.getByText('Delete All My Data'));
+
+  await waitFor(() => expect(deleteAllRuns).toHaveBeenCalledTimes(1));
+
+  const deleteCall = global.fetch.mock.calls.find(([, opts]) => opts && opts.method === 'DELETE');
+  expect(deleteCall).toBeTruthy();
+  expect(deleteCall[0]).toBe('http://localhost:5001/runs');
+  expect(JSON.parse(deleteCall[1].body)).toEqual({ deviceId: 'test-device-id' });
 });

@@ -144,3 +144,29 @@ def get_runs_for_device(device_id, db_path=DEFAULT_DB_PATH):
         ]
     finally:
         conn.close()
+
+
+def delete_runs_for_device(device_id, db_path=DEFAULT_DB_PATH):
+    """Deletes every synced run for one device_id -- the server-side half
+    of "delete my data" (§3's user-facing-controls requirement: "'Delete
+    my run history' and 'delete my account data' as real, working
+    buttons -- not a support ticket"). There's no separate "account" in
+    this app's device-scoped model (see this module's own docstring), so
+    this IS the account-data deletion, not a second mechanism -- deleting
+    a device_id's rows here is deleting everything the server holds that's
+    identifiable to that device.
+
+    A real DELETE, not a soft-delete/status flip (unlike closures'
+    resolve/expire, which deliberately keep history for their own
+    reasons -- see closures.py) -- the whole point here is that the data
+    stops existing, not that it's marked as something else.
+
+    Returns the number of rows actually deleted (0 if the device_id had
+    no synced runs -- not an error, just nothing to do)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute("DELETE FROM runs WHERE device_id = ?", (device_id,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()

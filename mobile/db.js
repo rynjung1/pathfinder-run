@@ -144,3 +144,15 @@ export async function getRuns() {
     runUuid: row.run_uuid,
   }));
 }
+
+// "Delete my data" -- the local half. See App.js's deleteAllData for the
+// full picture (this alone only clears the local copy; the server-side
+// synced copy, if any, needs its own DELETE /runs call, since they're two
+// separate stores by design -- local is always authoritative, server is
+// a best-effort backup on top, per this file's own header). A real
+// DELETE, not a soft flag -- same reasoning as scripts/runs.py's
+// delete_runs_for_device: the point is that the data stops existing.
+export async function deleteAllRuns() {
+  const db = await getDb();
+  await db.runAsync('DELETE FROM runs');
+}
