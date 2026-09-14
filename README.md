@@ -78,7 +78,10 @@ Beyond backend deployment, submitting to the App Store/Play Store needs:
 - **Privacy Manifest** (`mobile/app.json`'s `ios.privacyManifests`): declares precise-location collection accurately — was previously the stock Expo default declaring zero collected data types despite the app collecting and syncing location, now fixed.
 - **App identity**: real name ("Pathfinder Run", was "mobile") and a real icon (`mobile/assets/generate_icons.py` — was the unmodified Expo template default) — both fixed.
 - **Delete-my-data**: a real, working "Delete All My Data" button (Past Runs screen) clearing both local and server-synced data — required by app store review and by the privacy policy above; was missing entirely, now built.
-- **`eas.json` / a release build pipeline**: not set up yet.
+- **Android permissions**: the generated manifest was requesting `SYSTEM_ALERT_WINDOW` (a sensitive, Play-Store-scrutinized permission — "display over other apps"), plus legacy `READ_EXTERNAL_STORAGE`/`WRITE_EXTERNAL_STORAGE`/`VIBRATE`, none of which this app uses (confirmed via grep — no vibration/haptics/overlay code anywhere) — inherited from transitive Expo/React Native dependencies (`expo-file-system`, RN's own template), not requested by anything this app does. Blocked via `mobile/app.json`'s `android.blockedPermissions` (verified in a real `expo prebuild`: the generated manifest now carries `tools:node="remove"` on all four, which strips them from the built APK/AAB). The release manifest now only requests what's actually used: location + internet.
+- **Google Play Console's Data Safety form**: like Apple's Privacy Manifest, this is filled out in the console, not code — has to accurately declare: precise location (collected, linked to a device identifier, used for app functionality, not shared, user can request deletion), and that no data is sold or used for advertising. Should mirror the privacy policy above.
+- **`eas.json` / a release build pipeline**: not set up for either platform yet.
+- **Apple vs. Google enrollment cost**: Apple Developer Program is $99/year; Google Play Console is a one-time $25 registration fee — different from what's implied above if only targeting Android.
 
 ## License
 
