@@ -56,6 +56,12 @@
         }
       ],
       "expo-sqlite"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "4d1f5086-bf6b-449e-bdfb-e85736d4decb"
+      }
+    },
+    "owner": "rynjung"
   }
 }
