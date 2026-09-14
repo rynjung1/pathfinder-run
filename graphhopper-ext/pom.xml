@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Pathfinder Run: Java extension for GraphHopper, restoring greenness
+  scoring at Ontario scale via a static per-way encoded value instead of
+  the old live per-query custom_areas lookup (removed; see
+  ../graphhopper/pathfinder_foot.json's comment for why).
+
+  Deliberately a thin standalone import tool, not a modified web server:
+  confirmed via decompiling graphhopper-web.jar that GraphHopper.load()
+  (which is all the production server ever does; see
+  ../deploy/README.md's "build off-box, rsync the graph-cache" plan)
+  reconstructs its EncodingManager via EncodingManager.fromProperties(...),
+  entirely independent of the ImportRegistry that only matters at import
+  time. So the stock, unmodified graphhopper-web.jar can serve whatever
+  this tool produces: no Dropwizard/Jersey code needed here at all,
+  which is most of what made the original "multi-day" estimate for this
+  work as large as it was.
+
+  graphhopper-core:9.1 as `provided` scope: compiling against GraphHopper's
+  classes needs them on the compile classpath, but they're already present
+  at runtime via the real graphhopper-web.jar sitting next to this one on
+  the classpath (see run-import.sh); provided scope keeps this jar small
+  and avoids bundling a second copy of a 45MB dependency tree.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>run.pathfinder</groupId>
+  <artifactId>graphhopper-ext</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <graphhopper.version>9.1</graphhopper.version>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.graphhopper</groupId>
+      <artifactId>graphhopper-core</artifactId>
+      <version>${graphhopper.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- Jackson for reading the precomputed way-id JSON
+         (data/greenspace_way_ids*.json): already a transitive dependency
+         of graphhopper-core, pinned explicitly here only so the version is
+         intentional, not incidental. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.17.1</version>
+      <scope>provided</scope>
+    </dependency>
+    <!-- For parsing config-ontario.yml directly (the same real config file
+         production uses, not a hand-duplicated copy of its settings):
+         provided scope, same reasoning; already on the runtime classpath
+         via graphhopper-web.jar's own bundled deps. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.dataformat</groupId>
+      <artifactId>jackson-dataformat-yaml</artifactId>
+      <version>2.17.1</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+</project>

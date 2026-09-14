@@ -12,37 +12,35 @@
 //   fetch_return_leg/fetch_outbound_leg -- because it changes request to
 //   request)
 //
-// Greenness/park-proximity (§5 point 1's second bullet) is REMOVED as of
-// the full-Ontario migration, not just never-added -- it was here as an
-// `in_greenspace` rule (see git history for the exact form and its
-// verification) sourced from data/greenspace/greenspace.geojson via
-// config.yml's `custom_areas.directory`, GraphHopper's STATIC per-import
-// mechanism. That worked fine at city scale (Waterloo Region, Guelph) and
-// was even confirmed CH/speed-mode compatible there. At province scale it
-// is the confirmed root cause of /route being unusably slow in flexible
-// mode (ch.disable=true, required by every per-request custom_model
-// mechanism this app uses: edge-reuse, closures, the long-way buffer fix):
-// `in_greenspace` is a live per-edge point-in-polygon lookup against
-// 315,762 greenspace polygons, evaluated for every edge weight computation
-// flexible mode has to make without CH's precomputed shortcuts to fall
-// back on. Disambiguated directly, not inferred: an identical test query
-// against a scratch Ontario graph with this exact rule stripped out
-// completed in 49ms with LM prep enabled, versus 22-56s for the same query
-// against the real graph with it in place -- everything else held equal.
+// Greenness/park-proximity (§5 point 1's second bullet): RESTORED, via a
+// static "greenspace" encoded value baked in at import time -- not the
+// old `in_greenspace` custom_areas mechanism (removed during the
+// full-Ontario migration; see git history around that removal for why:
+// a live per-edge point-in-polygon lookup against 315,762 polygons was
+// the confirmed root cause of /route being unusably slow in flexible
+// mode at province scale, disambiguated directly -- 49ms vs 22-56s for
+// an identical query with only that rule stripped out).
 //
-// A proper fix would bake an in_greenspace-equivalent value into the graph
-// as a static encoded value at import time (so it costs nothing per query,
-// the same way road_class/surface/etc. do today), which requires a custom
-// Java TagParser + GraphHopper ImportRegistry extension -- confirmed via
-// decompiling the stock graphhopper-web.jar that no config-level or
-// OSM-tag-preprocessing path can do this (GraphHopper's encoded-value
-// registry is a fixed, closed set of ~50 hardcoded names, no generic
-// tag-to-encoded-value mechanism exists). Filed as a future item, not
-// blocking: multi-day Java build-out (new build toolchain, new custom
-// Application entry point, a spatial-indexed preprocessing pass), not
-// something to do incidentally here. scripts/build_greenspace.py and
-// data/greenspace-ontario/ are left in place, unused, for whenever that
-// work happens -- the polygon data itself doesn't need rebuilding.
+// This time it costs nothing per query, the same way road_class/surface/
+// etc. already don't: graphhopper-ext/ (a small standalone Java tool, run
+// once at import time, not part of the web server) registers "greenspace"
+// as a real encoded value via GraphHopper's ImportRegistry extension
+// point, sourced from scripts/compute_greenspace_way_ids.py's offline
+// precomputation (an OSM-way-id set, not live polygon geometry --
+// GraphHopper's TagParser callback only exposes tags/node-ids during
+// import, not resolved coordinates, so the actual point-in-polygon spatial
+// join happens once, offline, in Python with a proper spatial index,
+// not per-way in Java).
+//
+// Confirmed empirically, not assumed, that this is genuinely free at
+// serve time: GraphHopper.load() (all the production server ever does)
+// reconstructs its EncodingManager via EncodingManager.fromProperties(...),
+// confirmed via decompilation to be completely independent of the
+// ImportRegistry -- so the stock, unmodified graphhopper-web.jar serves a
+// graph built by graphhopper-ext/'s importer with zero server-side code
+// changes, and CH speed mode stays fully engaged (verified:
+// dijkstrabi|ch-routing in the log, not a flexible-mode fallback). See
+// graphhopper-ext/README.md for the full mechanism and how to rebuild.
 //
 // Note: this replaces the stock model's `multiply_by: foot_priority` rather than
 // layering on top of it. GraphHopper's built-in `foot_priority` (FootPriorityParser)
@@ -62,7 +60,8 @@
     { "if": "!foot_access", "multiply_by": "0" },
     { "if": "road_class == PATH || road_class == FOOTWAY || road_class == PEDESTRIAN || road_class == LIVING_STREET", "multiply_by": "1.5" },
     { "else_if": "road_class == PRIMARY || road_class == SECONDARY", "multiply_by": "0.3" },
-    { "else_if": "road_class == TRUNK || road_class == MOTORWAY", "multiply_by": "0.1" }
+    { "else_if": "road_class == TRUNK || road_class == MOTORWAY", "multiply_by": "0.1" },
+    { "if": "greenspace", "multiply_by": "1.3" }
   ],
   "speed": [
     { "if": "true", "limit_to": "foot_average_speed" }

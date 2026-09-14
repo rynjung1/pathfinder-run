@@ -15,16 +15,32 @@
 # partway through the (then ~8-minute) import.
 #
 # That specific finding is now stale, not current justification --
-# greenness/in_greenspace was removed at province scale (see
-# pathfinder_foot.json's and config-ontario.yml's comments; the
-# disambiguating LM test that led to its removal), so a from-scratch
-# import no longer approaches anywhere near that peak (subnetwork marking
-# alone dropped from ~207s to ~1.6s once greenness was gone -- see
-# config-ontario.yml). See deploy/pathfinder-graphhopper.service's own
-# comment for the current, measured, steady-state-serving number that
-# replaced this reasoning for the production systemd unit (1536m there,
-# not 10g -- production never imports at all, so even the stale ~9.3GB
-# import-time figure was never the right number for that file).
+# greenness/in_greenspace (the LIVE per-query custom_areas version) was
+# removed at province scale (see pathfinder_foot.json's and
+# config-ontario.yml's comments; the disambiguating LM test that led to
+# its removal), so a from-scratch import no longer approaches anywhere
+# near that ~9.3GB peak. Greenness itself came back later via a
+# completely different, cheap mechanism (graphhopper-ext/'s static
+# encoded value, baked in once at import time, not evaluated live) --
+# a full-Ontario import with it included measured at 55s, matching the
+# no-greenness baseline (~62s), nothing like the old live-lookup
+# approach.
+#
+# IMPORTANT operational trap: this script runs the STOCK jar, which
+# imports from scratch (no greenspace encoded value) if graph-cache
+# doesn't already exist at the configured location -- it does NOT know
+# about graphhopper-ext at all. Since pathfinder_foot.json now references
+# "greenspace" unconditionally, running this script against a missing/
+# deleted graph-cache directory will fail at startup (the custom_model
+# references an encoded value the stock-imported graph doesn't have).
+# If graph-cache-ontario/ doesn't exist, use run-import.sh instead (see
+# graphhopper-ext/README.md) -- NOT this script -- to build it with
+# greenness included, then this script serves it normally afterward.
+# See deploy/pathfinder-graphhopper.service's own comment for the
+# current, measured, steady-state-serving number that replaced this
+# reasoning for the production systemd unit (1536m there, not 10g --
+# production never imports at all, so even the stale ~9.3GB import-time
+# figure was never the right number for that file).
 #
 # Left at 10g here anyway, deliberately, not re-tuned down: this is a
 # ceiling, not a reservation, so it costs nothing on this dev machine's

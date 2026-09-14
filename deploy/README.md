@@ -45,7 +45,7 @@ and not your own login user.
 
 ## Don't build the graph on the VPS
 
-The full-Ontario import takes a few minutes and modest peak memory --
+The full-Ontario import takes about a minute and modest peak memory --
 fine on a dev machine, wasteful to provision a small production VPS
 around a one-time cost it only pays during a rebuild. Build locally (as
 this whole project has done throughout), then ship the result:
@@ -60,12 +60,18 @@ all in the repo already (`long_ways_ontario.json` and `ontario.geojson`
 are small and git-tracked; `graph-cache-ontario/` is gitignored precisely
 because of its size -- that's what the rsync above is for).
 
-(`data/greenspace-ontario/` and the greenness routing rule it fed are no
-longer part of the pipeline -- removed at province scale as the confirmed
-root cause of /route being unusably slow in flexible mode. See
-pathfinder_foot.json's and config-ontario.yml's comments. Nothing to ship
-for it currently; that data stays local, unused, pending the future
-Java-side fix.)
+Greenness (§5 point 1's second bullet) IS part of the pipeline again, as
+of `graphhopper-ext/`'s static "greenspace" encoded value -- see that
+directory's README for the full mechanism. This means a rebuild is no
+longer just `run-graphhopper.sh`: greenness needs a fresh
+`data/greenspace_way_ids_ontario.json` (regenerate via
+`scripts/compute_greenspace_way_ids.py` whenever the OSM extract itself
+changes -- not needed for a routine rebuild against the same extract)
+and the actual import must go through `graphhopper-ext`'s
+`PathfinderImporter`, not the stock jar's own import path (see that
+README for the exact command). Once the graph-cache exists, *serving*
+it is unchanged -- still the plain, unmodified `graphhopper-web.jar`
+via `run-graphhopper.sh`; the custom code only ever runs at import time.
 
 ## Install steps (once a domain is sorted and step 4 resumes)
 

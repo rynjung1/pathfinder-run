@@ -10,7 +10,7 @@ Most running apps either give turn-by-turn point-to-point directions or make you
 
 v1 and v2 core scope (see [`docs/running-app-architecture.md`](docs/running-app-architecture.md) §0 for the phased plan this was built from) are both done:
 
-- Self-hosted routing engine (GraphHopper) with a custom pedestrian profile (`graphhopper/pathfinder_foot.json`), covering the full province of Ontario, not just a single city (`graphhopper/config-ontario.yml`).
+- Self-hosted routing engine (GraphHopper) with a custom pedestrian profile (`graphhopper/pathfinder_foot.json`) — path-type weighting plus greenness/park-proximity, the latter via a small Java extension (`graphhopper-ext/`) baking a static "greenspace" encoded value into the graph at import time rather than evaluating it per request — covering the full province of Ontario, not just a single city (`graphhopper/config-ontario.yml`).
 - Loop generation with an edge-reuse penalty and a compactness score (`scripts/generate_loop.py`).
 - Mobile client: request a route, choose between the 2-3 generated alternatives, view the chosen one on a map (`mobile/App.js`).
 - Live GPS tracking during a run, with on-device deviation detection.

@@ -25,16 +25,26 @@ from generate_loop import (
 
 # Uptown Waterloo, bearing 120 degrees, 3km target -- the exact case used
 # throughout this project's manual regression checks (most recently: the
-# full-Ontario migration, and the in_greenspace removal, each confirmed
-# against this same request). The expected distance below is the CURRENT
-# post-in_greenspace-removal value (see 4c8681d) -- greenness's removal
-# legitimately changed which path is cheapest, so this is not the older
-# 3059.0299999999997 baseline from before that commit.
+# full-Ontario migration, the in_greenspace removal, and now greenness's
+# restoration via graphhopper-ext/'s static encoded value -- each
+# confirmed against this same request). The expected distance has changed
+# twice, legitimately, not as a regression each time:
+#   3059.0299999999997 -- original baseline, live in_greenspace active
+#   2988.2780000000002 -- after in_greenspace was removed (root cause of
+#                          /route being unusably slow in flexible mode
+#                          at province scale; see 4c8681d)
+#   3068.4449999999997 -- current: greenness restored via a static
+#                          "greenspace" encoded value baked in at import
+#                          time (graphhopper-ext/), costing nothing per
+#                          query -- verified CH speed mode stays engaged.
+# Each change legitimately altered which path is cheapest; this isn't the
+# same number recurring, it's the real effect of each change confirmed
+# against the live server before updating the test.
 START_LAT, START_LON = 43.4643, -80.5204
 BEARING_DEG = 120.0
 TARGET_DISTANCE_M = 3000
 PROFILE = "foot"
-EXPECTED_TOTAL_DISTANCE_M = 2988.2780000000002
+EXPECTED_TOTAL_DISTANCE_M = 3068.4449999999997
 
 # Short and separate from generate_loop.py's own request timeout
 # (30s, sized for a real slow query) -- this is just a reachability

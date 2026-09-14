@@ -55,6 +55,10 @@ __pycache__/
 .venv/
 venv/
 
+# Java / Maven (graphhopper-ext/) -- build output, rebuilt via `mvn package`
+target/
+*.class
+
 # Local SQLite databases (runtime data, not source)
 *.db
 *.sqlite

@@ -12,6 +12,15 @@
 # (e.g. `apt install openjdk-17-jdk` on Debian/Ubuntu) just needs `java`
 # on PATH, no detection dance required.
 #
+# Note: this 1536m measurement predates greenness's restoration
+# (graphhopper-ext/'s static "greenspace" encoded value). Not re-measured
+# after that change -- one extra boolean per edge is 1 bit, negligible
+# against a graph already measured in hundreds of MB, so this isn't
+# expected to move meaningfully, but it's an assumption, not re-verified
+# under load the way the number below originally was. Re-run the same
+# concurrent-load test described below if steady-state memory ever looks
+# off in production.
+#
 # -Xmx1536m: measured, not guessed, and NOT the same -Xmx10g run-graphhopper.sh
 # still uses locally. That 10g figure came from this machine's finding that
 # importing the full province with the real (now-removed, see 4c8681d)

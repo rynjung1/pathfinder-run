@@ -12,18 +12,24 @@ graphhopper:
   #
   # Feasibility investigated before building this for real: a scratch
   # import (no greenness) took ~62s/2.5GB peak/322MB graph-cache; adding
-  # the real 736MB province-wide greenspace.geojson (in_greenspace, via
-  # custom_areas.directory) raised that to ~479s/4.33GB peak, same 322MB
-  # graph-cache -- a real, one-time, ~130x-slower subnetwork-marking cost
-  # concentrated at import time. CH speed mode was unaffected by this, but
-  # per-request flexible mode (ch.disable=true, required by every
-  # per-request custom_model mechanism: edge-reuse, closures, the long-way
-  # buffer fix) turned out NOT to be -- in_greenspace made /route itself
-  # unusably slow at province scale (confirmed via a disambiguating LM
-  # test: 49ms vs 22-56s for an identical query with it removed), so
-  # greenness/park-proximity was removed from pathfinder_foot.json and
-  # custom_areas.directory below with it. See that file's comments for the
-  # full writeup and the future-item fix.
+  # the real 736MB province-wide greenspace.geojson via the OLD mechanism
+  # (in_greenspace, a live per-query lookup through custom_areas.directory)
+  # raised that to ~479s/4.33GB peak import cost, AND -- much worse --
+  # made /route itself unusably slow in flexible mode (ch.disable=true,
+  # required by every per-request custom_model mechanism: edge-reuse,
+  # closures, the long-way buffer fix; confirmed via a disambiguating LM
+  # test: 49ms vs 22-56s for an identical query with it removed). That
+  # mechanism was removed from pathfinder_foot.json and
+  # custom_areas.directory with it.
+  #
+  # Greenness came BACK later via a different mechanism -- a static
+  # "greenspace" encoded value baked in at import time by graphhopper-ext/,
+  # not evaluated live -- which doesn't have either problem: a real
+  # full-Ontario import with it included measured at 55s (matching the
+  # no-greenness baseline, nothing like the ~479s live-lookup cost), and
+  # CH speed mode stays fully engaged at serve time (verified:
+  # dijkstrabi|ch-routing in the request log). See
+  # graphhopper-ext/README.md for the full mechanism and how to rebuild.
   #
   # OpenStreetMap input file PBF or XML, can be changed via command line -Ddw.graphhopper.datareader.file=some.pbf
   datareader.file: ../data/raw/ontario-260910.osm.pbf
@@ -243,11 +249,19 @@ graphhopper:
   # scale: it's a live per-edge point-in-polygon lookup against 315,762
   # polygons, confirmed (via a disambiguating LM test with it stripped out:
   # 49ms vs 22-56s for an identical query) to be the root cause of /route
-  # being unusably slow in flexible mode. See pathfinder_foot.json's
-  # comments for the full writeup and the future-item fix (a static
-  # encoded value baked in at import time via a custom Java TagParser).
-  # data/greenspace-ontario/ and scripts/build_greenspace.py are left in
-  # place, unused, for that future work.
+  # being unusably slow in flexible mode.
+  #
+  # Not re-enabled since: greenness came back via graphhopper-ext/'s static
+  # "greenspace" encoded value instead (baked in once at import time, via
+  # PathfinderImporter -- see run-import.sh -- not evaluated per query),
+  # which needs no custom_areas entry at all -- it's a real EncodedValue,
+  # read back from the graph-cache's own stored properties at serve time
+  # the same as road_class/foot_access always have been, not a per-request
+  # geometry lookup. data/greenspace-ontario/ and scripts/build_greenspace.py
+  # are left in place, unused -- superseded by
+  # scripts/compute_greenspace_way_ids.py, not needed for the current
+  # mechanism, but harmless to keep as the source-of-truth polygon data if
+  # that script's own logic is ever revisited.
 
 
   #### Country Rules ####
