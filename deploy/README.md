@@ -1,9 +1,12 @@
 # Deployment notes
 
-Not run yet -- provisioning (step 4) is on hold pending a domain (Caddy's
-automatic HTTPS needs one; it can't issue a cert for a bare IP). This
-documents the assumed layout the two systemd units in this directory
-reference, so step 4 is "follow this," not "figure this out."
+Not run yet -- provisioning (step 4) is on hold pending a VPS and a
+domain (Caddy's automatic HTTPS needs one; it can't issue a cert for a
+bare IP). Everything short of that is actually ready now, not just
+planned: the two systemd units, `deploy/Caddyfile` (syntax-validated
+with the real `caddy` binary), and the install steps below exist so
+that once a VPS and domain exist, this is "follow this," not "figure
+this out."
 
 ## VPS sizing
 
@@ -88,7 +91,14 @@ via `run-graphhopper.sh`; the custom code only ever runs at import time.
    inbound. Nothing else -- GraphHopper (8995/8996) and route_api.py
    (127.0.0.1:5001) are both intentionally not internet-reachable
    directly; Caddy is the only public surface.
-9. Caddy + the real domain -- still blocked on step 4's prerequisite.
+9. Caddy: install it (see `deploy/Caddyfile`'s header comment for the
+   exact apt commands), fill in the real domain in place of that file's
+   `api.example.com` placeholder, `sudo cp deploy/Caddyfile
+   /etc/caddy/Caddyfile && sudo systemctl reload caddy`. Validated with
+   the real `caddy validate` locally (adapts cleanly to JSON); the only
+   thing that's genuinely blocked on having a domain is Let's Encrypt
+   issuing the cert, which happens automatically the moment Caddy sees
+   a real hostname in the site block instead of the placeholder.
 
 ## Backups
 

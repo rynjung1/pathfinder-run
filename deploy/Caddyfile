@@ -1,0 +1,50 @@
+# Caddy reverse proxy for route_api.py -- the one piece deploy/README.md's
+# step 9 has referenced from the start but never actually written, since
+# it was blocked on having a real domain to put in it. Still is: the
+# placeholder below is the only thing left to fill in once a domain
+# exists (and DNS for it points at the VPS's IP) -- nothing else here
+# should need to change.
+#
+# Why Caddy specifically (over nginx/similar): automatic HTTPS. Caddy
+# gets a cert from Let's Encrypt and renews it with zero config beyond
+# putting a real domain in the site block below -- no certbot, no cron
+# job, no manual renewal step to forget. That's the whole reason step 4
+# (provisioning) was on hold on a domain in the first place: Let's
+# Encrypt can't issue a cert for a bare IP, so this file was inert until
+# one existed.
+#
+# Install (Debian/Ubuntu -- official repo, ships its own systemd unit,
+# so there's no deploy/pathfinder-caddy.service to write):
+#   sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+#   sudo apt update && sudo apt install caddy
+#
+# Then:
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # after filling in the real domain below
+#   sudo systemctl reload caddy
+#
+# Caddy binds 80/443 itself and needs no separate firewall rule beyond
+# deploy/README.md step 8's "allow 443 inbound" -- port 80 stays open
+# too, but only for the ACME HTTP challenge and to redirect to https,
+# which Caddy does automatically for any site block using a real
+# hostname (not needed/added explicitly below).
+
+# TODO: replace with the real domain once one is registered and its DNS
+# A record points at this VPS. Everything below this line is otherwise
+# ready to use as-is.
+api.example.com {
+	# route_api.py/serve.py binds 127.0.0.1:5001 only (see serve.py's own
+	# module docstring) -- Caddy is the sole public-facing surface, exactly
+	# as deploy/README.md's firewall section (step 8) assumes.
+	reverse_proxy 127.0.0.1:5001
+
+	# route_api.py already does its own structured logging; this is
+	# Caddy's separate access log (who hit the edge, status, latency) --
+	# cheap, and the first thing worth checking if requests are timing out
+	# somewhere between the mobile client and route_api.py rather than
+	# inside it.
+	log {
+		output file /var/log/caddy/pathfinder-run-access.log
+	}
+}

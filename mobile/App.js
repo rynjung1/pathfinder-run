@@ -79,9 +79,20 @@ import {
 // localhost reaches a server running on the same machine directly. That is
 // NOT true for a physical device (or an Android emulator, which needs
 // 10.0.2.2 instead) -- those need the dev machine's LAN IP. route_api.py
-// binds to 0.0.0.0 for exactly this reason; only this constant needs to
-// change to point at it from a real device.
-const API_BASE_URL = 'http://localhost:5001';
+// binds to 0.0.0.0 for exactly this reason.
+//
+// Read from EXPO_PUBLIC_API_BASE_URL, not hardcoded -- found while getting
+// deploy/ ready for a real domain: this was a plain string literal until
+// then, which meant the only way to point a build at anything other than
+// localhost was hand-editing this line and remembering to edit it back, and
+// every EAS build (including the one already run this session) would have
+// silently shipped pointing at localhost regardless of profile. Same
+// EXPO_PUBLIC_ inlining mechanism as API_KEY below: set
+// EXPO_PUBLIC_API_BASE_URL in mobile/.env for local overrides, or per EAS
+// build profile via `eas env:set --environment <profile>` once the real
+// backend has a domain (deploy/README.md) -- unset (the common case today),
+// this still defaults to the same localhost value it always used.
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:5001';
 const TARGET_DISTANCE_M = 5000;
 
 // route_api.py's pre-deployment hardening pass added a required X-API-Key
