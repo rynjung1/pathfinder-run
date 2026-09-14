@@ -193,6 +193,20 @@ export default function App() {
   const [startCoord, setStartCoord] = useState(null);
   const [liveCoord, setLiveCoord] = useState(null);
   const [deviationDistance, setDeviationDistance] = useState(null);
+  // §3's "make it visible when a run is being recorded ... never track
+  // silently" -- was entirely unmet until now: the only signal an active
+  // run existed was which buttons happened to be showing (Pause/End Run),
+  // with no live distance or duration displayed anywhere during the run
+  // itself (formatDistance/formatDuration were only ever used on the
+  // Past Runs/replay screens, after the fact). liveDistanceM mirrors
+  // traceRef via state (recomputed in the same watchPositionAsync callback
+  // that already re-renders for liveCoord/deviationDistance, so this adds
+  // no extra re-renders); durationTick exists purely to force a re-render
+  // once a second while running so the displayed duration counts up --
+  // the actual duration value itself still comes from runTimingRef
+  // (below), not from this counter.
+  const [liveDistanceM, setLiveDistanceM] = useState(0);
+  const [durationTick, setDurationTick] = useState(0);
   const [mapReady, setMapReady] = useState(false);
   const [reportingClosure, setReportingClosure] = useState(false);
   // Separate from sessionState -- the past-runs list is a standalone
@@ -228,6 +242,19 @@ export default function App() {
   useEffect(() => {
     return () => stopWatching();
   }, []);
+
+  // Ticks once a second, only while actually running -- purely to force a
+  // re-render so the live duration display (below, computed from
+  // runTimingRef) counts up instead of sitting frozen between GPS pings
+  // (watchPositionAsync's callback frequency depends on WATCH_OPTIONS'
+  // distance/time filters, not a steady 1s cadence, so relying on it alone
+  // would make the clock visibly stutter). Intentionally not running while
+  // paused -- the displayed duration is meant to freeze then, not tick.
+  useEffect(() => {
+    if (sessionState !== 'running') return;
+    const id = setInterval(() => setDurationTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [sessionState]);
 
   // Fit the map to every candidate's extent once they're loaded, rather than
   // a fixed box around the start point -- a 5km+ loop routinely runs off the
@@ -363,6 +390,10 @@ export default function App() {
       traceRef.current.push({ ...coord, timestamp: position.timestamp });
       setLiveCoord(coord);
       setDeviationDistance(distanceToRouteMeters(coord, selectedCoords));
+      // Recomputed from the same trace saveRun/handleEnd will eventually
+      // use (traceDistanceMeters), not tracked separately -- so the live
+      // number and the one that ends up in run history can't drift apart.
+      setLiveDistanceM(traceDistanceMeters(traceRef.current));
     });
   }
 
@@ -376,6 +407,7 @@ export default function App() {
     // 'ready' (see the state machine), so this is genuinely a new run
     // starting, not a resume (that's handleResume, below).
     traceRef.current = [];
+    setLiveDistanceM(0);
     runTimingRef.current = { startedAt: new Date().toISOString(), activeMs: 0, segmentStartedAt: Date.now() };
     runUuidRef.current = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
     setSessionState('running');
@@ -619,6 +651,16 @@ export default function App() {
 
   const isTracking = sessionState === 'running' || sessionState === 'paused';
   const isDeviated = isTracking && deviationDistance !== null && deviationDistance > DEVIATION_THRESHOLD_M;
+  // durationTick isn't read directly -- its setter (ticking once a second
+  // while running, above) is what forces this to recompute; the value
+  // itself always comes fresh from runTimingRef so it can't drift out of
+  // sync with the ref the way a separately-tracked duration state could.
+  // Frozen correctly while paused: segmentStartedAt is null then, so this
+  // is just the already-accumulated activeMs with nothing added.
+  const liveDurationMs = isTracking
+    ? runTimingRef.current.activeMs +
+      (runTimingRef.current.segmentStartedAt ? Date.now() - runTimingRef.current.segmentStartedAt : 0)
+    : 0;
   // §6: "during or after a run" -- not idle/generating/ready, there's no
   // meaningful "here" to report yet.
   const canReportClosure = sessionState === 'running' || sessionState === 'paused' || sessionState === 'done';
@@ -791,16 +833,30 @@ export default function App() {
           </>
         )}
         {sessionState === 'running' && (
-          <View style={styles.buttonRow}>
-            <Button title="Pause" onPress={handlePause} />
-            <Button title="End Run" color="#B00020" onPress={handleEnd} />
-          </View>
+          <>
+            {/* §3's "make it visible when a run is being recorded ...
+                never track silently" -- the buttons below already implied
+                a run was active, but nothing showed the live distance/
+                duration a "recording" indicator should. */}
+            <Text style={styles.recordingIndicator}>
+              ● Recording -- {formatDistance(liveDistanceM)} · {formatDuration(liveDurationMs)}
+            </Text>
+            <View style={styles.buttonRow}>
+              <Button title="Pause" onPress={handlePause} />
+              <Button title="End Run" color="#B00020" onPress={handleEnd} />
+            </View>
+          </>
         )}
         {sessionState === 'paused' && (
-          <View style={styles.buttonRow}>
-            <Button title="Resume" onPress={handleResume} />
-            <Button title="End Run" color="#B00020" onPress={handleEnd} />
-          </View>
+          <>
+            <Text style={styles.recordingIndicator}>
+              ⏸ Paused -- {formatDistance(liveDistanceM)} · {formatDuration(liveDurationMs)}
+            </Text>
+            <View style={styles.buttonRow}>
+              <Button title="Resume" onPress={handleResume} />
+              <Button title="End Run" color="#B00020" onPress={handleEnd} />
+            </View>
+          </>
         )}
         {sessionState === 'done' && (
           <Button title="New Route" onPress={handleReset} />
@@ -857,6 +913,13 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontSize: 13,
     color: '#555',
+    marginBottom: 10,
+  },
+  recordingIndicator: {
+    textAlign: 'center',
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#2E7D32',
     marginBottom: 10,
   },
   reportRow: {

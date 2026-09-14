@@ -12,16 +12,26 @@
  * "the server" and "the device" return, rather than needing a real
  * GraphHopper instance or SQLite/location hardware.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 import { Alert } from 'react-native';
 
+// Captured by the watchPositionAsync mock below so a test can simulate a
+// real GPS ping by calling it directly -- App.js's handleStart flow calls
+// Location.getForegroundPermissionsAsync() (distinct from
+// requestForegroundPermissionsAsync, used only pre-route-generation), so
+// that needs its own mock too, not just the request variant.
+let watchCallback = null;
 jest.mock('expo-location', () => ({
   Accuracy: { BestForNavigation: 6 }, // App.js only references this by name at module load, value is irrelevant here
   requestForegroundPermissionsAsync: jest.fn(() => Promise.resolve({ status: 'granted' })),
+  getForegroundPermissionsAsync: jest.fn(() => Promise.resolve({ status: 'granted' })),
   getCurrentPositionAsync: jest.fn(() =>
     Promise.resolve({ coords: { latitude: 43.4643, longitude: -80.5204 }, timestamp: Date.now() })
   ),
-  watchPositionAsync: jest.fn(() => Promise.resolve({ remove: jest.fn() })),
+  watchPositionAsync: jest.fn((options, callback) => {
+    watchCallback = callback;
+    return Promise.resolve({ remove: jest.fn() });
+  }),
 }));
 
 jest.mock('../db', () => ({
@@ -117,4 +127,32 @@ test('Delete All My Data clears local runs and calls the server DELETE endpoint'
   expect(deleteCall).toBeTruthy();
   expect(deleteCall[0]).toBe('http://localhost:5001/runs');
   expect(JSON.parse(deleteCall[1].body)).toEqual({ deviceId: 'test-device-id' });
+});
+
+test('starting a run shows a live Recording indicator that updates as GPS points come in', async () => {
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  fireEvent.press(screen.getByText('Start Run'));
+  // No GPS points yet -- a single-point trace has no distance to sum.
+  await waitFor(() => screen.getByText(/Recording.*0\.00 km/));
+
+  // Two pings, ~630m apart (0.0057° latitude at this longitude) -- enough
+  // points for traceDistanceMeters (geometry.js) to have a real consecutive
+  // pair to sum, mirroring exactly what watchPositionAsync's real callback
+  // does in startWatching.
+  await act(async () => {
+    watchCallback({ coords: { latitude: 43.4643, longitude: -80.5204 }, timestamp: Date.now() });
+  });
+  await act(async () => {
+    watchCallback({ coords: { latitude: 43.47, longitude: -80.5204 }, timestamp: Date.now() });
+  });
+
+  await waitFor(() => expect(screen.queryByText(/Recording.*0\.00 km/)).toBeNull());
+  expect(screen.getByText(/Recording.*0\.6\d km/)).toBeTruthy();
+
+  // Pause freezes the label (Paused, not Recording) but keeps showing the
+  // same accumulated distance -- doesn't reset to 0.
+  fireEvent.press(screen.getByText('Pause'));
+  await waitFor(() => screen.getByText(/Paused.*0\.6\d km/));
 });
