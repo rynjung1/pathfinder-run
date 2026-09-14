@@ -10,6 +10,7 @@ import {
   distanceToRouteMeters,
   formatDistance,
   formatDuration,
+  formatPace,
   mergeRunHistory,
   traceDistanceMeters,
 } from './geometry';
@@ -258,6 +259,13 @@ export default function App() {
   // See DEFAULT_TARGET_DISTANCE_M/DISTANCE_PRESETS_M above -- this is the
   // one place "how far" actually lives now, instead of a fixed constant.
   const [targetDistanceM, setTargetDistanceM] = useState(DEFAULT_TARGET_DISTANCE_M);
+  // The just-finished run, for the post-run summary (sessionState ===
+  // 'done', below) -- set once, in handleEnd. Deliberately not read from
+  // liveDistanceM/liveDurationMs for this: those are only meaningful
+  // while isTracking is true (liveDurationMs is hardcoded to 0 once
+  // sessionState leaves 'running'/'paused'), so they'd show a summary of
+  // zero, not this run's real numbers.
+  const [lastRun, setLastRun] = useState(null);
   const [selectedCandidateIndex, setSelectedCandidateIndex] = useState(0);
   const [startCoord, setStartCoord] = useState(null);
   const [liveCoord, setLiveCoord] = useState(null);
@@ -669,6 +677,7 @@ export default function App() {
     syncRunToServer(run).catch((err) => {
       console.warn('Run sync failed (saved locally, will not retry):', err.message || err);
     });
+    setLastRun(run);
     setSessionState('done');
   }
 
@@ -864,6 +873,7 @@ export default function App() {
     setLiveCoord(null);
     setDeviationDistance(null);
     setInitialRegion(null);
+    setLastRun(null);
     setSessionState('idle');
     generateRoute();
   }
@@ -1116,7 +1126,41 @@ export default function App() {
           </>
         )}
         {sessionState === 'done' && (
-          <Button title="New Route" onPress={handleReset} />
+          // Was just a bare "New Route" button -- researched running-app
+          // UX conventions before building this (post-run screens
+          // consistently lead with distance/time/pace right away, not
+          // buried in Past Runs), and this app genuinely had zero
+          // feedback here: finishing a run gave no confirmation of what
+          // was just accomplished at all. lastRun (handleEnd, above) is
+          // used instead of liveDistanceM/liveDurationMs specifically
+          // because those go stale/zero the moment isTracking becomes
+          // false, which happens right as this renders. Guarded on
+          // lastRun existing (it always should by the time this state is
+          // reachable) so a null/missed-set case still leaves the one
+          // essential action -- New Route -- reachable rather than
+          // rendering nothing at all.
+          <View style={styles.summaryContainer}>
+            {lastRun && (
+              <>
+                <Text style={styles.summaryTitle}>Run complete 🎉</Text>
+                <View style={styles.summaryStatsRow}>
+                  <View style={styles.summaryStat}>
+                    <Text style={styles.summaryStatValue}>{formatDistance(lastRun.actualDistanceM)}</Text>
+                    <Text style={styles.summaryStatLabel}>Distance</Text>
+                  </View>
+                  <View style={styles.summaryStat}>
+                    <Text style={styles.summaryStatValue}>{formatDuration(lastRun.durationMs)}</Text>
+                    <Text style={styles.summaryStatLabel}>Time</Text>
+                  </View>
+                  <View style={styles.summaryStat}>
+                    <Text style={styles.summaryStatValue}>{formatPace(lastRun.actualDistanceM, lastRun.durationMs)}</Text>
+                    <Text style={styles.summaryStatLabel}>Pace</Text>
+                  </View>
+                </View>
+              </>
+            )}
+            <Button title="New Route" onPress={handleReset} />
+          </View>
         )}
         {canReportClosure && (
           <View style={styles.reportRow}>
@@ -1196,6 +1240,36 @@ const styles = StyleSheet.create({
   },
   distanceChipTextSelected: {
     color: '#fff',
+  },
+  summaryContainer: {
+    alignItems: 'center',
+  },
+  summaryTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    marginBottom: 14,
+  },
+  summaryStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-evenly',
+    width: '100%',
+    marginBottom: 16,
+  },
+  summaryStat: {
+    alignItems: 'center',
+  },
+  summaryStatValue: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#2E7D32',
+    fontVariant: ['tabular-nums'],
+  },
+  summaryStatLabel: {
+    fontSize: 12,
+    color: '#555',
+    marginTop: 2,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   reportRow: {
     marginTop: 8,

@@ -12,6 +12,7 @@ import {
   distanceToRouteMeters,
   formatDistance,
   formatDuration,
+  formatPace,
   haversineMeters,
   mergeRunHistory,
   pointToSegmentDistance,
@@ -187,6 +188,27 @@ test('formatDistance: renders kilometers to 2 decimal places', () => {
   expect(formatDistance(5000)).toBe('5.00 km');
   expect(formatDistance(1234)).toBe('1.23 km');
   expect(formatDistance(0)).toBe('0.00 km');
+});
+
+// --- formatPace ----------------------------------------------------------
+
+test('formatPace: 5km in exactly 30 minutes is 6:00 /km', () => {
+  expect(formatPace(5000, 30 * 60 * 1000)).toBe('6:00 /km');
+});
+
+test('formatPace: 10km in exactly 50 minutes is 5:00 /km', () => {
+  expect(formatPace(10000, 50 * 60 * 1000)).toBe('5:00 /km');
+});
+
+test('formatPace: rounds seconds and carries a rounded-up 60 into the next minute', () => {
+  // 1km in 5:59.6 -- 59.6 rounds to 60, which must carry to 6:00, not
+  // render as the nonsensical "5:60".
+  expect(formatPace(1000, 5 * 60 * 1000 + 59600)).toBe('6:00 /km');
+});
+
+test('formatPace: zero or missing distance renders a placeholder, not Infinity/NaN', () => {
+  expect(formatPace(0, 60000)).toBe('--:-- /km');
+  expect(formatPace(null, 60000)).toBe('--:-- /km');
 });
 
 // --- mergeRunHistory ---------------------------------------------------

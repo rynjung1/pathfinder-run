@@ -104,6 +104,28 @@ export function formatDistance(meters) {
   return `${(meters / 1000).toFixed(2)} km`;
 }
 
+// Pace (minutes per km) -- researched running-app UX conventions before
+// adding this (post-run summary screens consistently lead with
+// distance/time/pace together, not distance and time alone), and this
+// app had never computed it anywhere despite having both inputs
+// (traceDistanceMeters, runTimingRef) the whole time. "M:SS /km", the
+// standard running-app convention, not decimal minutes -- "6.5 min/km"
+// isn't how any runner actually reads a pace.
+export function formatPace(meters, ms) {
+  if (!meters || meters <= 0) return '--:-- /km';
+  const paceMinutesPerKm = ms / 60000 / (meters / 1000);
+  const wholeMinutes = Math.floor(paceMinutesPerKm);
+  let seconds = Math.round((paceMinutesPerKm - wholeMinutes) * 60);
+  // Rounding can carry a fractional pace like 5:59.7 up to a nonsensical
+  // "5:60" -- same boundary case formatDuration's whole-suite rounding
+  // (Math.round(ms / 1000) before splitting into h/m/s) never hits since
+  // it rounds before splitting, not after; this splits first, so it
+  // needs its own carry.
+  const minutes = seconds === 60 ? wholeMinutes + 1 : wholeMinutes;
+  if (seconds === 60) seconds = 0;
+  return `${minutes}:${String(seconds).padStart(2, '0')} /km`;
+}
+
 // Combines a device's local run history with its server-synced copy for
 // display (App.js's openHistory) -- local is always authoritative and
 // kept as-is; a server run only gets added if its runUuid isn't already

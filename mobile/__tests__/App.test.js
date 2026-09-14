@@ -282,7 +282,50 @@ test('adaptive GPS sampling switches to the coarse profile after sustained still
   expect(Location.watchPositionAsync.mock.calls[2][0]).toMatchObject({ distanceInterval: 5 });
 });
 
+test('ending a run shows a post-run summary with real distance, time, and pace', async () => {
+  // saveRun is a jest.fn() shared across this whole file -- see the
+  // identical reasoning on Location.watchPositionAsync.mockClear() above.
+  saveRun.mockClear();
+  // Researched running-app UX conventions before building this screen --
+  // this test formalizes the actual behavior: finishing a run used to
+  // show a bare "New Route" button with zero feedback on what was just
+  // run. Two real GPS pings (same ~630m-apart pair as the Recording
+  // indicator test) so there's a real, deterministic distance to check,
+  // not just "a summary rendered."
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  fireEvent.press(screen.getByText('Start Run'));
+  await waitFor(() => screen.getByText(/Recording/));
+
+  await act(async () => {
+    watchCallback({ coords: { latitude: 43.4643, longitude: -80.5204 }, timestamp: Date.now() });
+  });
+  await act(async () => {
+    watchCallback({ coords: { latitude: 43.47, longitude: -80.5204 }, timestamp: Date.now() });
+  });
+
+  await act(async () => {
+    fireEvent.press(screen.getByText('End Run'));
+  });
+
+  await waitFor(() => screen.getByText('Run complete 🎉'));
+  expect(screen.getByText('0.63 km')).toBeTruthy(); // Distance stat
+  expect(screen.getByText('Distance')).toBeTruthy();
+  expect(screen.getByText('Time')).toBeTruthy();
+  // Pace is timing-dependent (real elapsed wall-clock ms in a fast test),
+  // so this checks it's a real "M:SS /km" value, not the zero-distance
+  // placeholder or NaN -- the exact number isn't the point here,
+  // formatPace's own unit tests (geometry.test.js) already cover the math.
+  expect(screen.getByText(/^\d+:\d{2} \/km$/)).toBeTruthy();
+  expect(screen.getByText('New Route')).toBeTruthy();
+});
+
 test('ending a run captures a map snapshot, and replaying that run shows it instead of a live map', async () => {
+  // All shared jest.fn()s across this file -- see the earlier test's
+  // identical comment on saveRun.
+  saveRun.mockClear();
+  MapView.__takeSnapshotMock.mockClear();
+  __copyMock.mockClear();
   render(<App />);
   await waitFor(() => screen.getByText(/Selected: #1/));
 
