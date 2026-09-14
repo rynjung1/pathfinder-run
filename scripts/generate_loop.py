@@ -652,19 +652,23 @@ def score_candidate(candidate, target_distance, compactness_weight=DEFAULT_COMPA
     real test runs (actually walking generated routes, per
     docs/running-app-architecture.md §0/§7) show it needs adjusting.
 
-    Greenness/park-proximity (§5 point 1's second bullet) is NOT a term
-    here. It used to be baked into pathfinder_foot.json's routing cost (an
-    `in_greenspace` priority multiplier) instead of being a scoring term,
-    but that rule has since been removed at province scale -- it was the
-    confirmed root cause of /route being unusably slow in flexible mode
-    (see pathfinder_foot.json's and config-ontario.yml's comments). A
-    proper fix is filed as a future item (a static encoded value baked in
-    at import time via a custom Java TagParser); until then, greenness is
-    simply not represented anywhere in route generation, not here and not
-    in the routing cost. §5 point 3's separate "path-type score
-    (sidewalk/park path percentage)" criterion is still not a distinct
-    scoring term here -- the routing-cost-level path-type weighting still
-    does the equivalent job for candidate generation, greenness aside.
+    Greenness/park-proximity (§5 point 1's second bullet) is STILL NOT a
+    term here, but -- stale note corrected -- it IS represented elsewhere
+    now, at the routing-cost level: pathfinder_foot.json's `greenspace`
+    priority multiplier (a static encoded value baked in at import time by
+    graphhopper-ext/'s PathfinderImporter, not the old per-query
+    `in_greenspace` custom_areas mechanism that made /route unusably slow
+    in flexible mode at province scale -- see that removal's history in
+    pathfinder_foot.json's and config-ontario.yml's comments). That WAS
+    "a proper fix... filed as a future item" as this docstring used to say;
+    it shipped. So, same as path-type below: greenness doesn't need its
+    own scoring term here because the routing search itself already
+    prefers greener edges before a candidate ever reaches score_candidate
+    -- adding a second greenness term here would be double-counting the
+    same preference, not filling a gap. §5 point 3's separate "path-type
+    score (sidewalk/park path percentage)" criterion is, for the same
+    reason, still not a distinct scoring term here -- the routing-cost-level
+    path-type weighting does the equivalent job for candidate generation.
     """
     distance_error_pct = 100 * abs(candidate["total_distance"] - target_distance) / target_distance
     reuse_pct = 100 * len(candidate["reused"]) / len(candidate["outbound_ways"]) if candidate["outbound_ways"] else 0

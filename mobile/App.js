@@ -74,6 +74,26 @@ import {
 //   isn't an Expo gap to work around -- it's Apple's platform rule.
 //   Matches the doc's own §0 phasing: Always/background is v3, explicitly
 //   opt-in, not default.
+// - Offline map tiles for the last route (§2's local-store box lists this
+//   explicitly) -- found while re-sweeping the doc against what's actually
+//   built; genuinely never implemented OR previously acknowledged anywhere
+//   in this file, unlike everything else on this list. Not built now
+//   either: react-native-maps has no built-in tile-caching story, so this
+//   means picking a specific approach (a different maps SDK entirely with
+//   real offline region support, e.g. Mapbox, vs. hand-rolling a tile
+//   cache) -- a real product/library decision, not a small addition, so
+//   it's being named here as a deliberate gap rather than picked
+//   unilaterally.
+// - Adaptive GPS sampling (§2's "switch to a coarser interval automatically
+//   when the accelerometer/motion API shows no movement") -- also found on
+//   the same re-sweep, also never built or previously acknowledged.
+//   WATCH_OPTIONS below is a fixed 2s/5m filter regardless of actual
+//   movement. Battery-life-only (accuracy/functionality are unaffected),
+//   and doing it right means a real motion-detection heuristic (expo-sensors'
+//   Accelerometer, some stationary threshold, watchPositionAsync doesn't
+//   support changing options in place so this would mean tearing down and
+//   restarting the subscription) -- again a real feature to design, not a
+//   one-line fix, so named here rather than built without that design pass.
 //
 // Addressing: an iOS Simulator shares the host Mac's network stack, so
 // localhost reaches a server running on the same machine directly. That is
