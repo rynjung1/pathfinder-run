@@ -4,7 +4,36 @@ Copy-paste reference for the actual App Store Connect submission form,
 same spirit as `docs/app-store-privacy-labels.md` — real copy grounded
 in what this app actually does, not generic filler, ready the moment
 Apple Developer Program access exists. Character counts below are exact
-(counted by hand against Apple's real field limits, not estimated).
+(verified by running them through Python's `len()` against Apple's real
+field limits, not counted by eye).
+
+## Screenshots (`docs/app-store-screenshots/`)
+
+Two real screenshots, not mockups — captured from an actual compiled
+build running against the real backend/GraphHopper instance, at exactly
+1320×2868 (Apple's required 6.9" iPhone Pro Max class; verified with
+`PIL.Image.size`, not assumed) — installed the same build already
+verified working onto an `iPhone 17 Pro Max` simulator specifically to
+get this exact required resolution, rather than upload something the
+wrong size and have App Store Connect reject it:
+
+- `6.9in-light-route-selection.png` — the main screen: a real generated
+  route, the distance picker, and the branded button system, in light
+  mode
+- `6.9in-dark-route-selection.png` — the identical screen in dark mode,
+  showing the theme system actually re-rendering everything correctly
+  (not just that dark mode "exists")
+
+Both show the app's core loop-generation screen, which is the strongest
+single screenshot for this app's actual pitch. A full App Store
+screenshot SET (this app store guidelines recommend 3-10) would ideally
+also show the post-run summary and past-runs replay screens, but
+capturing those needs tapping through a live run first — blocked in
+this environment (confirmed: simulator tap synthesis doesn't work here,
+tried multiple approaches including AppleScript/cliclick and idb, all
+failed for reasons outside this codebase). These two are real and
+submission-ready as-is; more can be added once someone can tap through
+the rest of the flow on a real device.
 
 ## App Name (30 char max)
 
