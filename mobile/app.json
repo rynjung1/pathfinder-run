@@ -55,7 +55,19 @@
           "locationWhenInUsePermission": "Pathfinder Run uses your current location to generate a running route starting from where you are."
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#2E7D32",
+          "dark": {
+            "backgroundColor": "#121212"
+          }
+        }
+      ]
     ],
     "extra": {
       "eas": {
