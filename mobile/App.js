@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, Text, View, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity, Image, useColorScheme } from 'react-native';
+import { StyleSheet, Text, View, ActivityIndicator, Alert, FlatList, TouchableOpacity, Image, useColorScheme } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
 import { Directory, File, Paths } from 'expo-file-system';
 import MapView, { Polyline, Marker } from 'react-native-maps';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { saveRun, getRuns, getOrCreateDeviceId, deleteAllRuns } from './db';
 import {
   distanceToRouteMeters,
@@ -346,9 +347,29 @@ function showErrorAlert(title, actionHint, err) {
   Alert.alert(title, `${actionHint} (${String(err.message || err)})`);
 }
 
+// Wraps AppInner in SafeAreaProvider -- required for useSafeAreaInsets
+// (AppInner, below) to have anything to read from. Split out from
+// AppInner rather than one component, since a component can't consume
+// context it provides itself in the same render.
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppInner />
+    </SafeAreaProvider>
+  );
+}
+
+function AppInner() {
   const colors = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  // Real device safe-area insets (notch/Dynamic Island/home indicator),
+  // not the Platform.OS-only guesses (`Platform.OS === 'ios' ? 56 : 16`)
+  // this used before -- found on the same UI/UX pass: those were tuned
+  // for roughly one device shape and would be wrong (too little padding
+  // under a Dynamic Island, unnecessary extra padding on a home-button
+  // iPhone or Android) on anything else. useSafeAreaInsets is the actual
+  // per-device value, computed once and read by createStyles below.
+  const insets = useSafeAreaInsets();
+  const styles = useMemo(() => createStyles(colors, insets), [colors, insets]);
   const mapRef = useRef(null);
   // A separate ref/onMapReady flag from the main session map above -- this
   // is a different MapView instance (mounted only on the run-detail screen,
@@ -1358,7 +1379,7 @@ export default function App() {
 // being literals. Called via useMemo in both AppButton and App
 // (recomputed only when the theme's colors object actually changes, i.e.
 // on a real light/dark switch, not on every render).
-function createStyles(colors) {
+function createStyles(colors, insets = { top: 0, bottom: 0, left: 0, right: 0 }) {
   return StyleSheet.create({
   container: {
     flex: 1,
@@ -1427,7 +1448,7 @@ function createStyles(colors) {
   },
   controls: {
     padding: 16,
-    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
+    paddingBottom: 16 + insets.bottom,
     backgroundColor: colors.background,
   },
   buttonRow: {
@@ -1506,7 +1527,7 @@ function createStyles(colors) {
     left: 0,
     right: 0,
     backgroundColor: colors.warningBanner,
-    paddingTop: Platform.OS === 'ios' ? 56 : 16,
+    paddingTop: insets.top + 16,
     paddingBottom: 12,
     paddingHorizontal: 16,
   },
@@ -1520,7 +1541,7 @@ function createStyles(colors) {
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'ios' ? 56 : 16,
+    paddingTop: insets.top + 16,
     paddingBottom: 12,
   },
   historyTitle: {
@@ -1533,7 +1554,7 @@ function createStyles(colors) {
   },
   deleteDataRow: {
     padding: 16,
-    paddingBottom: Platform.OS === 'ios' ? 32 : 16,
+    paddingBottom: 16 + insets.bottom,
     alignItems: 'center',
   },
   runRow: {

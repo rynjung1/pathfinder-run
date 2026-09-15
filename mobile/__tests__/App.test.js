@@ -16,6 +16,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-
 import * as ReactNative from 'react-native';
 import { Alert } from 'react-native';
 import * as Location from 'expo-location';
+import * as SafeAreaContext from 'react-native-safe-area-context';
 
 // Flattens an RN style prop (a value, or an array of values/falsy
 // entries/nested arrays -- exactly what style={[a, b && c]} produces)
@@ -279,6 +280,40 @@ test('distance chips are real accessible buttons, and accessibilityState tracks 
   // (the previous choice) no longer is.
   expect(screen.getByRole('button', { name: '8 kilometers', selected: true })).toBeTruthy();
   expect(screen.getByRole('button', { name: '5 kilometers', selected: false })).toBeTruthy();
+});
+
+test('real device safe-area insets are actually used in layout, not just defaulted to zero', async () => {
+  // Distinctive, non-zero, realistic values (a Dynamic-Island-class top
+  // inset, a home-indicator-class bottom inset) -- picked so this can't
+  // pass by coincidence the way asserting against 0 or the mock's own
+  // default could. __mocks__/react-native-safe-area-context.js's default
+  // (all zeros) is what every other test in this file implicitly runs
+  // against; this one overrides it for real.
+  // __setMockInsets, not jest.spyOn/reassigning useSafeAreaInsets itself
+  // -- App.js's `import { useSafeAreaInsets }` destructures the function
+  // once at module load (confirmed empirically: neither approach affected
+  // what App.js actually called), so the mock's return value has to be
+  // configurable through a variable the already-bound function reads from
+  // on every call instead. Restored in finally since this isn't a
+  // jest.spyOn mock afterEach's restoreAllMocks would clean up on its own.
+  SafeAreaContext.__setMockInsets({ top: 59, bottom: 34, left: 0, right: 0 });
+
+  try {
+    render(<App />);
+    await waitFor(() => screen.getByText(/Selected: #1/));
+
+    fireEvent.press(screen.getByText('Past Runs'));
+    await waitFor(() => screen.getByText('Delete All My Data'));
+
+    // Past Runs' header title Text -- unambiguous here (the main screen's
+    // "Past Runs" button no longer exists, that whole screen unmounted on
+    // navigation), so this is definitely historyHeader's child, not the
+    // button from before.
+    const headerTitle = screen.getByText('Past Runs');
+    expect(flattenStyle(headerTitle.parent.parent.props.style).paddingTop).toBe(59 + 16); // insets.top + 16
+  } finally {
+    SafeAreaContext.__setMockInsets({ top: 0, right: 0, bottom: 0, left: 0 });
+  }
 });
 
 test('Delete All My Data clears local runs and calls the server DELETE endpoint', async () => {
