@@ -75,8 +75,9 @@ async function ensureMapSnapshotUriColumn(db) {
 
 function getDb() {
   if (!dbPromise) {
-    dbPromise = SQLite.openDatabaseAsync(DB_NAME).then(async (db) => {
-      await db.execAsync(`
+    dbPromise = SQLite.openDatabaseAsync(DB_NAME)
+      .then(async (db) => {
+        await db.execAsync(`
         CREATE TABLE IF NOT EXISTS runs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           started_at TEXT NOT NULL,
@@ -90,10 +91,23 @@ function getDb() {
           device_id TEXT NOT NULL
         );
       `);
-      await ensureRunUuidColumn(db);
-      await ensureMapSnapshotUriColumn(db);
-      return db;
-    });
+        await ensureRunUuidColumn(db);
+        await ensureMapSnapshotUriColumn(db);
+        return db;
+      })
+      .catch((err) => {
+        // Without this, a single transient open/migration failure (a
+        // real possibility -- openDatabaseAsync is a genuine native call
+        // that can reject, e.g. on-disk corruption or a full disk) would
+        // permanently wedge dbPromise on a rejected promise: every future
+        // getDb() call skips the `if (!dbPromise)` branch entirely and
+        // just re-awaits that same rejection forever, breaking every DB
+        // operation in the app for the rest of the session with no way to
+        // recover short of restarting it. Resetting to null lets the next
+        // call actually retry the open instead.
+        dbPromise = null;
+        throw err;
+      });
   }
   return dbPromise;
 }

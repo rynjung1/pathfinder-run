@@ -210,3 +210,30 @@ describe('schema migration (ensureRunUuidColumn / ensureMapSnapshotUriColumn)', 
     expect(columns.filter((name) => name === 'map_snapshot_uri')).toHaveLength(1);
   });
 });
+
+describe('getDb failure recovery', () => {
+  // Found on a sweep: getDb() memoizes its connection in a module-level
+  // dbPromise, set the first time anything calls it and never reset --
+  // if that very first open (a real native call, genuinely able to
+  // reject: on-disk corruption, a full disk) failed, every later getDb()
+  // call would skip the `if (!dbPromise)` check and just re-await the
+  // same already-rejected promise forever, permanently breaking every DB
+  // operation for the rest of the app's process lifetime with no way to
+  // recover short of a full restart -- a single transient failure had a
+  // permanent effect. __failNextOpen (__mocks__/expo-sqlite.js) is new,
+  // added specifically to make this failure simulatable at all -- nothing
+  // in the existing mock could previously make openDatabaseAsync reject.
+  test('a failed open does not permanently wedge every future call on the same rejection', async () => {
+    const { __failNextOpen } = require('expo-sqlite');
+    __failNextOpen(new Error('disk full'));
+
+    const { getOrCreateDeviceId } = loadDb();
+    await expect(getOrCreateDeviceId()).rejects.toThrow('disk full');
+
+    // No __failNextOpen queued this time -- a real, healthy open. Must
+    // actually succeed, not just reject again with the same stale error.
+    const id = await getOrCreateDeviceId();
+    expect(typeof id).toBe('string');
+    expect(id.length).toBeGreaterThan(0);
+  });
+});

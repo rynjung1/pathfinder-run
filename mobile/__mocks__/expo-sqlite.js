@@ -22,9 +22,18 @@
 const Database = require('better-sqlite3');
 
 let pendingRawDb = null;
+let pendingOpenError = null;
 
 function __useDatabaseForNextOpen(rawDb) {
   pendingRawDb = rawDb;
+}
+
+// Makes the NEXT openDatabaseAsync call reject with this error, then
+// clears itself -- for testing db.js's own handling of a failed open
+// (SQLite.openDatabaseAsync is a real native call in production and can
+// genuinely reject, e.g. on-disk corruption or a storage-full device).
+function __failNextOpen(err) {
+  pendingOpenError = err;
 }
 
 function wrapDatabase(rawDb) {
@@ -57,9 +66,14 @@ function wrapDatabase(rawDb) {
 }
 
 async function openDatabaseAsync(_name) {
+  if (pendingOpenError) {
+    const err = pendingOpenError;
+    pendingOpenError = null;
+    throw err;
+  }
   const rawDb = pendingRawDb || new Database(':memory:');
   pendingRawDb = null;
   return wrapDatabase(rawDb);
 }
 
-module.exports = { openDatabaseAsync, __useDatabaseForNextOpen, __RawDatabase: Database };
+module.exports = { openDatabaseAsync, __useDatabaseForNextOpen, __failNextOpen, __RawDatabase: Database };
