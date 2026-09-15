@@ -9,7 +9,7 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Pathfinder Run uses your current location to generate a running route starting from where you are.",
+        "NSLocationWhenInUseUsageDescription": "Pathfinder Run uses your location to generate a running route starting from where you are, and to track your position, distance, and pace while you run.",
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.rynjung.pathfinderrun",
