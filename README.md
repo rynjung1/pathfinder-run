@@ -12,12 +12,14 @@ v1 and v2 core scope (see [`docs/running-app-architecture.md`](docs/running-app-
 
 - Self-hosted routing engine (GraphHopper) with a custom pedestrian profile (`graphhopper/pathfinder_foot.json`) — path-type weighting plus greenness/park-proximity, the latter via a small Java extension (`graphhopper-ext/`) baking a static "greenspace" encoded value into the graph at import time rather than evaluating it per request — covering the full province of Ontario, not just a single city (`graphhopper/config-ontario.yml`).
 - Loop generation with an edge-reuse penalty and a compactness score (`scripts/generate_loop.py`).
-- Mobile client: request a route, choose between the 2-3 generated alternatives, view the chosen one on a map (`mobile/App.js`).
+- Mobile client: pick a distance (real presets, not a fixed 5km), request a route, choose between the 2-3 generated alternatives, view the chosen one on a map, and see a real post-run summary (distance/time/pace) when you finish (`mobile/App.js`) — a real branded UI (not stock components), with actual dark mode and accessibility support (screen-reader labels/roles, real touch targets, per-device safe-area insets), not an afterthought.
 - Live GPS tracking during a run, with on-device deviation detection.
 - Crowdsourced closure reporting, matched to OSM edges and fed into the routing cost (`scripts/closures.py`).
 - Run history: local SQLite storage, replay of a past run's actual recorded GPS trace on a map, and a best-effort device-scoped sync to the server for durability (`mobile/db.js`, `scripts/runs.py`) — no user accounts, so this doesn't survive an app reinstall; see `runs.py`'s module docstring for the honest scope.
 
 Also done: a pre-deployment hardening pass (API-key auth, per-IP rate limiting, input caps, a production WSGI server — `scripts/route_api.py`, `scripts/serve.py`). Actual VPS deployment hasn't happened yet — it's blocked on a domain (HTTPS needs one; see [`deploy/README.md`](deploy/README.md) for the concrete, ready-to-run plan). v3 (background/`Always` location) is a deliberate not-yet, not an oversight — see the file header of `mobile/App.js` for why.
+
+Real automated test coverage across the whole stack, not just the mobile geometry helpers it started with: Python (backend endpoints, closures, run storage, the route-scoring/GeoJSON output), the mobile client (including `db.js`'s SQLite logic, backed in tests by a real embedded SQLite engine rather than a mock, since `expo-sqlite` itself can't load under Jest), and `graphhopper-ext`'s Java extension — all three run in CI on every push ([`.github/workflows/test.yml`](.github/workflows/test.yml)), not just locally.
 
 ## Stack
 
