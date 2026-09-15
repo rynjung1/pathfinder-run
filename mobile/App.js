@@ -1106,7 +1106,7 @@ export default function App() {
           <AppButton title="Back" variant="secondary" onPress={closeHistory} />
         </View>
         {loadingHistory ? (
-          <ActivityIndicator style={styles.historyLoading} size="large" />
+          <ActivityIndicator style={styles.historyLoading} size="large" color={colors.accentForeground} />
         ) : pastRuns.length === 0 ? (
           <View style={styles.placeholder}>
             <Text style={styles.placeholderText}>No runs saved yet -- finish a run to see it here.</Text>
@@ -1140,7 +1140,7 @@ export default function App() {
         )}
         <View style={styles.deleteDataRow}>
           {deletingData ? (
-            <ActivityIndicator size="small" />
+            <ActivityIndicator size="small" color={colors.accentForeground} />
           ) : (
             <AppButton title="Delete All My Data" variant="destructive" onPress={deleteAllData} />
           )}
@@ -1211,7 +1211,10 @@ export default function App() {
       )}
 
       <View style={styles.controls}>
-        {sessionState === 'generating' && <ActivityIndicator size="large" />}
+        {/* Every ActivityIndicator in this file gets color={colors.accentForeground}
+            -- found unbranded (default OS gray) on a UI/UX pass; a loading
+            spinner is still part of the app's identity, not neutral chrome. */}
+        {sessionState === 'generating' && <ActivityIndicator size="large" color={colors.accentForeground} />}
         {sessionState === 'idle' && (
           // onPress={() => generateRoute()}, not onPress={generateRoute} --
           // Button's onPress hands its GestureResponderEvent as the first
@@ -1324,7 +1327,7 @@ export default function App() {
         {canReportClosure && (
           <View style={styles.reportRow}>
             {reportingClosure ? (
-              <ActivityIndicator />
+              <ActivityIndicator color={colors.accentForeground} />
             ) : (
               <AppButton title="Report closure" variant="closure" onPress={handleReportClosure} />
             )}
