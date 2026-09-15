@@ -559,7 +559,15 @@ export default function App() {
         headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
         body: JSON.stringify({ lat: latitude, lon: longitude, distance }),
       });
-      const body = await response.json();
+      // .catch(() => ({})), not a bare await -- found a real bug while
+      // auditing the backend: flask-limiter's default 429 response is
+      // Werkzeug's plain HTML error page, not JSON (confirmed against
+      // the real running server, not assumed), and a Caddy-level 502/504
+      // once deployed would be HTML too. Without this, hitting either
+      // would throw a raw JSON.parse SyntaxError here instead of the
+      // clean "route_api returned 429" message below -- exactly the kind
+      // of confusing technical error showErrorAlert was built to avoid.
+      const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(body.error || `route_api returned ${response.status}`);
       }
@@ -865,7 +873,8 @@ export default function App() {
         headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
         body: JSON.stringify({ lat: coord.latitude, lon: coord.longitude }),
       });
-      const body = await response.json();
+      // Same non-JSON-error-body fix as generateRoute's /route call above.
+      const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(body.error || `route_api returned ${response.status}`);
       }

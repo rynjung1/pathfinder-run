@@ -154,6 +154,31 @@ test('rank 1 is selected by default after a route is generated', async () => {
   expect(screen.getByText(/2\.99 km/)).toBeTruthy(); // rank 1's 2988.28m
 });
 
+test('a non-JSON error response (e.g. a real 429 from flask-limiter) shows a clean message, not a raw parse error', async () => {
+  // Confirmed against the real running server, not assumed: flask-limiter's
+  // default 429 body is Werkzeug's plain HTML error page, not JSON --
+  // response.json() on it throws a SyntaxError. Before generateRoute's
+  // `.catch(() => ({}))` fix, that SyntaxError propagated all the way to
+  // showErrorAlert's `(${String(err.message || err))})` and a user would
+  // see something like "Unexpected token '<'..." instead of the intended
+  // "route_api returned 429".
+  jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  global.fetch = jest.fn(() =>
+    Promise.resolve({
+      ok: false,
+      status: 429,
+      json: () => Promise.reject(new SyntaxError("Unexpected token '<', \"<!doctype \"... is not valid JSON")),
+    })
+  );
+
+  render(<App />);
+
+  await waitFor(() => expect(Alert.alert).toHaveBeenCalled());
+  const [title, message] = Alert.alert.mock.calls[0];
+  expect(title).toBe('Could not generate a route');
+  expect(message).toBe('Check your connection and try again. (route_api returned 429)');
+});
+
 test('tapping an alternate route selects it and updates the displayed distance', async () => {
   render(<App />);
   await waitFor(() => screen.getByText(/Selected: #1/));
