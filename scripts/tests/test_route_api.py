@@ -110,3 +110,92 @@ def test_route_with_non_positive_distance_is_rejected(client):
         headers={"X-API-Key": API_KEY},
     )
     assert response.status_code == 400
+
+
+# Everything below covers /closures and /runs -- only /route and /health
+# had any coverage until now, found on a follow-up sweep of this same
+# file. All of these hit real auth/validation code that returns before
+# ever touching a database or GraphHopper (confirmed by reading each
+# view function itself, same as /route's cases above), so none need the
+# DB/GraphHopper mocking a success-path test for these would.
+
+
+def test_closures_post_without_api_key_is_rejected(client):
+    response = client.post("/closures", json={"lat": 43.4643, "lon": -80.5204})
+    assert response.status_code == 401
+
+
+def test_closures_post_with_missing_fields_is_a_400(client):
+    response = client.post("/closures", json={"lat": 43.4643}, headers={"X-API-Key": API_KEY})
+    assert response.status_code == 400
+    assert "error" in response.get_json()
+
+
+def test_closures_patch_without_api_key_is_rejected(client):
+    response = client.patch("/closures/1", json={"resolve_token": "abc"})
+    assert response.status_code == 401
+
+
+def test_closures_patch_without_resolve_token_is_a_400(client):
+    response = client.patch("/closures/1", json={}, headers={"X-API-Key": API_KEY})
+    assert response.status_code == 400
+    assert "error" in response.get_json()
+
+
+def test_runs_post_without_api_key_is_rejected(client):
+    response = client.post("/runs", json={"deviceId": "d", "runUuid": "u"})
+    assert response.status_code == 401
+
+
+def test_runs_post_with_missing_device_id_is_a_400(client):
+    response = client.post("/runs", json={"runUuid": "u"}, headers={"X-API-Key": API_KEY})
+    assert response.status_code == 400
+    assert "error" in response.get_json()
+
+
+def test_runs_post_with_device_id_over_the_length_cap_is_rejected(client):
+    response = client.post(
+        "/runs",
+        json={"deviceId": "d" * (route_api.MAX_DEVICE_ID_LEN + 1), "runUuid": "u"},
+        headers={"X-API-Key": API_KEY},
+    )
+    assert response.status_code == 400
+
+
+def test_runs_post_with_too_many_trace_points_is_rejected(client):
+    response = client.post(
+        "/runs",
+        json={
+            "deviceId": "d",
+            "runUuid": "u",
+            "startedAt": "2026-01-01T00:00:00Z",
+            "targetDistanceM": 5000,
+            "actualDistanceM": 4900,
+            "durationMs": 1000,
+            "trace": [{"latitude": 0, "longitude": 0}] * (route_api.MAX_TRACE_POINTS + 1),
+        },
+        headers={"X-API-Key": API_KEY},
+    )
+    assert response.status_code == 400
+
+
+def test_runs_get_without_api_key_is_rejected(client):
+    response = client.get("/runs?deviceId=d")
+    assert response.status_code == 401
+
+
+def test_runs_get_without_device_id_is_a_400(client):
+    response = client.get("/runs", headers={"X-API-Key": API_KEY})
+    assert response.status_code == 400
+    assert "error" in response.get_json()
+
+
+def test_runs_delete_without_api_key_is_rejected(client):
+    response = client.delete("/runs", json={"deviceId": "d"})
+    assert response.status_code == 401
+
+
+def test_runs_delete_without_device_id_is_a_400(client):
+    response = client.delete("/runs", json={}, headers={"X-API-Key": API_KEY})
+    assert response.status_code == 400
+    assert "error" in response.get_json()
