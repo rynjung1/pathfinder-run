@@ -738,15 +738,35 @@ function AppInner() {
   // Continuous sampling starts here, and ONLY here -- when a run actually
   // starts, not on app load. The one-shot getCurrentPositionAsync above (to
   // know where to generate a route from) is unrelated to this.
+  // Returns whether tracking actually started -- handleStart/handleResume
+  // (below) depend on this to decide whether sessionState should actually
+  // move to 'running', rather than assuming it always succeeds. Found on a
+  // sweep: this used to be void, and both callers flipped sessionState to
+  // 'running' BEFORE awaiting this at all -- so a permission grant that
+  // reverted between route generation and tapping Start Run (a real iOS
+  // flow: "Allow Once" commonly reverts across even a brief background/
+  // foreground cycle) left the UI stuck showing a live "Recording" screen
+  // with zero GPS updates ever arriving, silently saving a bogus
+  // zero-distance run on End Run.
   async function startWatching() {
     const { status } = await Location.getForegroundPermissionsAsync();
     if (status !== 'granted') {
       Alert.alert('Location permission required', 'Pathfinder Run needs your location to track this run.');
-      return;
+      return false;
     }
-    gpsModeRef.current = 'fine';
-    await beginLocationWatch(WATCH_OPTIONS_FINE);
-    startMotionMonitoring();
+    try {
+      gpsModeRef.current = 'fine';
+      await beginLocationWatch(WATCH_OPTIONS_FINE);
+      startMotionMonitoring();
+      return true;
+    } catch (err) {
+      // beginLocationWatch's watchPositionAsync can reject (e.g. location
+      // services off at the OS level) -- without this catch, that
+      // rejection would propagate out as an unhandled promise rejection
+      // AND still leave sessionState wherever the caller already set it.
+      showErrorAlert('Could not start location tracking', 'This run was not started.', err);
+      return false;
+    }
   }
 
   function stopWatching() {
@@ -762,8 +782,13 @@ function AppInner() {
     setLiveDistanceM(0);
     runTimingRef.current = { startedAt: new Date().toISOString(), activeMs: 0, segmentStartedAt: Date.now() };
     runUuidRef.current = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    setSessionState('running');
-    await startWatching();
+    // Only actually enter 'running' if tracking really started --
+    // otherwise this stays on 'ready' (startWatching already alerted the
+    // user why) instead of showing a live "Recording" screen that will
+    // never receive a single GPS point.
+    if (await startWatching()) {
+      setSessionState('running');
+    }
   }
 
   function handlePause() {
@@ -778,8 +803,18 @@ function AppInner() {
 
   async function handleResume() {
     runTimingRef.current.segmentStartedAt = Date.now();
-    setSessionState('running');
-    await startWatching();
+    // Same fix as handleStart: don't flip to 'running' until tracking
+    // actually resumed. On failure, undo the segmentStartedAt stamp above
+    // too -- otherwise liveDurationMs (computed below from activeMs +
+    // "now minus segmentStartedAt" whenever segmentStartedAt is set,
+    // regardless of sessionState) would keep climbing while the screen
+    // still reads "Paused", ticking on dead time the same way the
+    // AppState-backgrounding bug did before that fix.
+    if (await startWatching()) {
+      setSessionState('running');
+    } else {
+      runTimingRef.current.segmentStartedAt = null;
+    }
   }
 
   // §2's "offline map tiles for the last route" -- addressed via a
@@ -860,6 +895,18 @@ function AppInner() {
       // Surfaced plainly rather than silently swallowed, but doesn't block
       // finishing the session (there's nothing left to retry against here).
       showErrorAlert('Could not save this run', "This run's data may be lost.", err);
+      // The snapshot PNG above was already written to disk before this
+      // failed -- with no DB row to reference it, nothing else in the app
+      // (deleteAllData walks mapSnapshotUri from saved rows only) can ever
+      // find or clean it up again. Best-effort: a failed delete here isn't
+      // worth a second alert on top of the one just shown.
+      if (mapSnapshotUri) {
+        try {
+          new File(mapSnapshotUri).delete();
+        } catch {
+          // Best-effort -- not worth a second alert on top of the one above.
+        }
+      }
     }
     // Best-effort server sync, AFTER the local save already succeeded (or
     // failed) -- local storage is authoritative; this is a durability

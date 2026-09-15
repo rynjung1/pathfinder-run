@@ -421,6 +421,103 @@ test('backgrounding the app mid-run auto-pauses it, the same as tapping Pause', 
   expect(screen.getByText(/Paused.*0\.6\d km/)).toBeTruthy();
 });
 
+test('tapping Start Run does not enter Recording if location permission was revoked since the route was generated', async () => {
+  // Found on a sweep: handleStart used to flip sessionState to 'running'
+  // BEFORE confirming startWatching() actually succeeded. A real iOS
+  // flow -- granting "Allow Once" at route-generation time, then having
+  // that grant revert across even a brief background/foreground cycle --
+  // left the app showing a live "Recording" screen with a working
+  // Pause/End Run, but zero GPS updates ever arriving (no watch
+  // subscription actually exists), silently saving a bogus
+  // zero-distance run on End Run. getForegroundPermissionsAsync (checked
+  // in startWatching, distinct from the requestForegroundPermissionsAsync
+  // prompt in generateRoute) is what actually reflects that reversion.
+  Location.getForegroundPermissionsAsync.mockResolvedValueOnce({ status: 'denied' });
+  jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  fireEvent.press(screen.getByText('Start Run'));
+
+  await waitFor(() =>
+    expect(Alert.alert).toHaveBeenCalledWith(
+      'Location permission required',
+      'Pathfinder Run needs your location to track this run.'
+    )
+  );
+  // Still on the 'ready' screen -- Start Run is still there, and there's
+  // no Recording/Paused indicator anywhere claiming a run is underway.
+  expect(screen.getByText('Start Run')).toBeTruthy();
+  expect(screen.queryByText(/Recording/)).toBeNull();
+});
+
+test('resuming a paused run does not enter Recording (or leave the live clock running) if location permission was lost while paused', async () => {
+  // Same root cause as the Start Run case above, for handleResume: it
+  // stamps runTimingRef.segmentStartedAt (the "resume, start counting
+  // active time again" marker) unconditionally, before knowing whether
+  // startWatching() will actually succeed. Without reverting that stamp
+  // on failure, liveDurationMs -- computed from activeMs + "now minus
+  // segmentStartedAt" whenever segmentStartedAt is set, independent of
+  // sessionState -- would keep climbing on wall-clock time while the
+  // screen still reads "Paused", the exact bug the AppState-backgrounding
+  // fix elsewhere in this file exists to prevent, reintroduced through a
+  // different door.
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  fireEvent.press(screen.getByText('Start Run'));
+  await waitFor(() => screen.getByText(/Recording/));
+  fireEvent.press(screen.getByText('Pause'));
+  await waitFor(() => screen.getByText(/Paused/));
+
+  Location.getForegroundPermissionsAsync.mockResolvedValueOnce({ status: 'denied' });
+  jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  const pausedDurationText = screen.getByText(/Paused.*\d+:\d{2}/).children.join('');
+
+  await act(async () => {
+    fireEvent.press(screen.getByText('Resume'));
+  });
+
+  await waitFor(() => expect(Alert.alert).toHaveBeenCalled());
+  expect(screen.queryByText(/Recording/)).toBeNull();
+  expect(screen.getByText('Resume')).toBeTruthy();
+
+  // The displayed duration must still be frozen, not silently climbing --
+  // this is the actual regression this test guards against, not just
+  // "still says Paused".
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  expect(screen.getByText(/Paused/).children.join('')).toBe(pausedDurationText);
+});
+
+test("a failed save deletes the run's already-captured map snapshot, so it isn't orphaned on disk forever", async () => {
+  // Found on a sweep: captureRunSnapshot writes a real PNG to disk before
+  // saveRun is ever attempted. If saveRun then throws, nothing previously
+  // referenced that file (no DB row was created), and deleteAllData's own
+  // cleanup only ever walks mapSnapshotUri from rows that exist in the
+  // DB -- so without this fix, a failed save left one PNG stranded with
+  // no code path in the app able to find or remove it again.
+  saveRun.mockClear();
+  __deleteMock.mockClear();
+  saveRun.mockRejectedValueOnce(new Error('disk full'));
+  jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  fireEvent.press(screen.getByText('Start Run'));
+  await waitFor(() => screen.getByText(/Recording/));
+
+  await act(async () => {
+    fireEvent.press(screen.getByText('End Run'));
+  });
+
+  await waitFor(() =>
+    expect(Alert.alert).toHaveBeenCalledWith('Could not save this run', "This run's data may be lost. (disk full)")
+  );
+  expect(__deleteMock).toHaveBeenCalledTimes(1);
+  expect(__deleteMock.mock.calls[0][0].uri).toMatch(/^file:\/\/\/mock-documents\/run-snapshots\/.*\.png$/);
+});
+
 test('adaptive GPS sampling switches to the coarse profile after sustained stillness, and back to fine on real motion', async () => {
   // watchPositionAsync is a single jest.fn() shared across this whole
   // file (defined once in the jest.mock factory above) -- other tests
@@ -542,12 +639,15 @@ test('ending a run captures a map snapshot, and replaying that run shows it inst
 });
 
 test('Delete All My Data also deletes each run\'s snapshot file, not just the database rows', async () => {
-  // deleteAllRuns is a jest.fn() shared across this whole file -- the
-  // earlier plain "Delete All My Data" test already left one call on it,
-  // and restoreAllMocks (afterEach, above) doesn't clear a plain jest.fn()'s
-  // call history, only jest.spyOn mocks -- same reasoning as
-  // Location.watchPositionAsync.mockClear() in the adaptive-sampling test.
+  // deleteAllRuns and __deleteMock are jest.fn()s shared across this whole
+  // file -- the earlier plain "Delete All My Data" test already left one
+  // call on deleteAllRuns, and the failed-save test above left one on
+  // __deleteMock, and restoreAllMocks (afterEach, above) doesn't clear a
+  // plain jest.fn()'s call history, only jest.spyOn mocks -- same
+  // reasoning as Location.watchPositionAsync.mockClear() in the
+  // adaptive-sampling test.
   deleteAllRuns.mockClear();
+  __deleteMock.mockClear();
   jest.spyOn(Alert, 'alert').mockImplementation((title, message, buttons) => {
     buttons.find((b) => b.text === 'Delete').onPress();
   });
