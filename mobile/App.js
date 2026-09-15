@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity, Image } from 'react-native';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { StyleSheet, Text, View, ActivityIndicator, Alert, Platform, FlatList, TouchableOpacity, Image, useColorScheme } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
@@ -219,6 +219,73 @@ const DEVIATION_THRESHOLD_M = 40;
 // geometry.js's own header and __tests__/geometry.test.js -- the
 // mobile-side counterpart to scripts/tests/test_geometry.py.
 
+// Dark mode -- found genuinely unsupported entirely: app.json's
+// userInterfaceStyle was hardcoded to "light" and every color in this
+// file was a literal, so a user with system dark mode on got a jarring
+// pure-white screen while the rest of their phone was dark, the kind of
+// thing that reads as "not a real app" more than any single UI element
+// would. One token set per theme, picked by the OS via useColorScheme
+// (no new dependency -- built into React Native), not a manual in-app
+// toggle -- matching how iOS/Android's own apps behave by default.
+//
+// Two tokens for anywhere this app's own green shows up, not one,
+// because they have different contrast requirements:
+// - accentFill/onAccent: a SOLID filled surface (primary button,
+//   selected distance chip) with light text on top -- contrast is
+//   entirely internal to that shape, unaffected by the page background
+//   behind it, so #2E7D32 with white text stays fine in both themes and
+//   doesn't need to change.
+// - accentForeground: the green itself used AS text/a border sitting
+//   DIRECTLY on the page background (secondary button outline+text, an
+//   unselected distance chip, the recording indicator, summary stat
+//   values) -- this one genuinely has to change per theme. Checked the
+//   actual contrast, not assumed: #2E7D32 text on this app's dark
+//   background (#121212) computes to ~3.45:1, below WCAG AA's 4.5:1
+//   minimum for normal text; #66BB6A (a brighter green) on the same
+//   background computes to ~8:1, comfortably clearing it.
+//
+// onWarningBanner also fixed here, in both themes, as a genuinely
+// separate pre-existing bug found during this same contrast pass: the
+// deviation-warning banner used white text on #FB8C00 (a bright orange)
+// -- ~1.75:1, failing badly regardless of app theme, not something dark
+// mode introduced. Switched to dark text on that same orange (~12:1).
+const LIGHT_COLORS = {
+  background: '#ffffff',
+  text: '#1a1a1a',
+  textSecondary: '#555555',
+  accentFill: '#2E7D32',
+  accentForeground: '#2E7D32',
+  onAccent: '#ffffff',
+  destructiveFill: '#B00020',
+  onDestructive: '#ffffff',
+  closureFill: '#8B4513',
+  onClosure: '#ffffff',
+  warningBanner: '#FB8C00',
+  onWarningBanner: '#1a1a1a',
+  border: '#cccccc',
+};
+
+const DARK_COLORS = {
+  background: '#121212',
+  text: '#F0F0F0',
+  textSecondary: '#A8A8A8',
+  accentFill: '#2E7D32',
+  accentForeground: '#66BB6A',
+  onAccent: '#ffffff',
+  destructiveFill: '#B00020',
+  onDestructive: '#ffffff',
+  closureFill: '#8B4513',
+  onClosure: '#ffffff',
+  warningBanner: '#FB8C00',
+  onWarningBanner: '#1a1a1a',
+  border: '#3A3A3A',
+};
+
+function useTheme() {
+  const scheme = useColorScheme();
+  return scheme === 'dark' ? DARK_COLORS : LIGHT_COLORS;
+}
+
 // A UI/UX pass, researched before building rather than guessed at: this
 // app used React Native's stock <Button> everywhere -- on iOS that
 // renders as plain colored text with no visible button boundary at all,
@@ -241,6 +308,8 @@ const DEVIATION_THRESHOLD_M = 40;
 // closure" is neither). minHeight 48 on buttonBase covers both
 // platforms' minimums regardless of title length/font scaling.
 function AppButton({ title, onPress, variant = 'primary', disabled = false }) {
+  const colors = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const variantStyles = {
     primary: [styles.buttonPrimary, styles.buttonPrimaryText],
     secondary: [styles.buttonSecondary, styles.buttonSecondaryText],
@@ -262,7 +331,24 @@ function AppButton({ title, onPress, variant = 'primary', disabled = false }) {
   );
 }
 
+// UI/UX sweep, error-message half: every failure path in this file used
+// to show the raw error straight to the user -- String(err.message ||
+// err), meaning things like "route_api returned 500", "missing or
+// invalid API key", or a bare network error class name, none of which a
+// non-technical user could act on ("errors explain what went wrong and
+// how to fix it," not developer text, per the researched UX-writing
+// guidance already applied to the button/accessibility passes). One
+// convention now, everywhere: a plain sentence of what to actually do,
+// with the real error appended in parentheses -- not hidden, since this
+// app has no crash reporting/analytics (see deploy/README.md) and an
+// alert is the only diagnostic trail a user could relay back at all.
+function showErrorAlert(title, actionHint, err) {
+  Alert.alert(title, `${actionHint} (${String(err.message || err)})`);
+}
+
 export default function App() {
+  const colors = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const mapRef = useRef(null);
   // A separate ref/onMapReady flag from the main session map above -- this
   // is a different MapView instance (mounted only on the run-detail screen,
@@ -508,7 +594,7 @@ export default function App() {
       setSelectedCandidateIndex(0);
       setSessionState('ready');
     } catch (err) {
-      Alert.alert('Could not generate route', String(err.message || err));
+      showErrorAlert('Could not generate a route', 'Check your connection and try again.', err);
       setSessionState('idle');
     }
   }
@@ -721,7 +807,7 @@ export default function App() {
       // real -- if this fails there's nothing left to fall back on.
       // Surfaced plainly rather than silently swallowed, but doesn't block
       // finishing the session (there's nothing left to retry against here).
-      Alert.alert('Could not save run', String(err.message || err));
+      showErrorAlert('Could not save this run', "This run's data may be lost.", err);
     }
     // Best-effort server sync, AFTER the local save already succeeded (or
     // failed) -- local storage is authoritative; this is a durability
@@ -785,7 +871,7 @@ export default function App() {
       }
       Alert.alert('Closure reported', `Thanks -- matched to way ${body.osm_way_id}.`);
     } catch (err) {
-      Alert.alert('Could not report closure', String(err.message || err));
+      showErrorAlert('Could not report the closure', 'Check your connection and try again.', err);
     } finally {
       setReportingClosure(false);
     }
@@ -827,7 +913,7 @@ export default function App() {
       }
       setPastRuns(merged);
     } catch (err) {
-      Alert.alert('Could not load past runs', String(err.message || err));
+      showErrorAlert('Could not load your past runs', 'Check your connection and try again.', err);
     } finally {
       setLoadingHistory(false);
     }
@@ -900,7 +986,7 @@ export default function App() {
               }
               setPastRuns([]);
             } catch (err) {
-              Alert.alert('Could not delete data', String(err.message || err));
+              showErrorAlert('Could not delete your data', 'Nothing was deleted -- check your connection and try again.', err);
             } finally {
               setDeletingData(false);
             }
@@ -1255,10 +1341,16 @@ export default function App() {
   );
 }
 
-const styles = StyleSheet.create({
+// A function, not a static StyleSheet.create() object -- has to be, now
+// that colors come from the current theme (useTheme, above) rather than
+// being literals. Called via useMemo in both AppButton and App
+// (recomputed only when the theme's colors object actually changes, i.e.
+// on a real light/dark switch, not on every render).
+function createStyles(colors) {
+  return StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#fff',
+    backgroundColor: colors.background,
   },
   // AppButton, above -- see that component's own comment for the
   // reasoning. minHeight 48 (not just paddingVertical) so short titles
@@ -1281,30 +1373,30 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   buttonPrimary: {
-    backgroundColor: '#2E7D32',
+    backgroundColor: colors.accentFill,
   },
   buttonPrimaryText: {
-    color: '#fff',
+    color: colors.onAccent,
   },
   buttonSecondary: {
     backgroundColor: 'transparent',
     borderWidth: 1.5,
-    borderColor: '#2E7D32',
+    borderColor: colors.accentForeground,
   },
   buttonSecondaryText: {
-    color: '#2E7D32',
+    color: colors.accentForeground,
   },
   buttonDestructive: {
-    backgroundColor: '#B00020',
+    backgroundColor: colors.destructiveFill,
   },
   buttonDestructiveText: {
-    color: '#fff',
+    color: colors.onDestructive,
   },
   buttonClosure: {
-    backgroundColor: '#8B4513',
+    backgroundColor: colors.closureFill,
   },
   buttonClosureText: {
-    color: '#fff',
+    color: colors.onClosure,
   },
   map: {
     flex: 1,
@@ -1314,16 +1406,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
+    backgroundColor: colors.background,
   },
   placeholderText: {
     fontSize: 16,
     textAlign: 'center',
-    color: '#555',
+    color: colors.textSecondary,
   },
   controls: {
     padding: 16,
     paddingBottom: Platform.OS === 'ios' ? 32 : 16,
-    backgroundColor: '#fff',
+    backgroundColor: colors.background,
   },
   buttonRow: {
     flexDirection: 'row',
@@ -1332,33 +1425,33 @@ const styles = StyleSheet.create({
   candidateHint: {
     textAlign: 'center',
     fontSize: 13,
-    color: '#555',
+    color: colors.textSecondary,
     marginBottom: 10,
   },
   recordingIndicator: {
     textAlign: 'center',
     fontSize: 14,
     fontWeight: '600',
-    color: '#2E7D32',
+    color: colors.accentForeground,
     marginBottom: 10,
   },
   distanceChip: {
     borderWidth: 1,
-    borderColor: '#2E7D32',
+    borderColor: colors.accentForeground,
     borderRadius: 16,
     paddingVertical: 6,
     paddingHorizontal: 14,
     marginBottom: 10,
   },
   distanceChipSelected: {
-    backgroundColor: '#2E7D32',
+    backgroundColor: colors.accentFill,
   },
   distanceChipText: {
-    color: '#2E7D32',
+    color: colors.accentForeground,
     fontWeight: '600',
   },
   distanceChipTextSelected: {
-    color: '#fff',
+    color: colors.onAccent,
   },
   summaryContainer: {
     alignItems: 'center',
@@ -1367,6 +1460,7 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     marginBottom: 14,
+    color: colors.text,
   },
   summaryStatsRow: {
     flexDirection: 'row',
@@ -1380,12 +1474,12 @@ const styles = StyleSheet.create({
   summaryStatValue: {
     fontSize: 20,
     fontWeight: '700',
-    color: '#2E7D32',
+    color: colors.accentForeground,
     fontVariant: ['tabular-nums'],
   },
   summaryStatLabel: {
     fontSize: 12,
-    color: '#555',
+    color: colors.textSecondary,
     marginTop: 2,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
@@ -1399,13 +1493,13 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    backgroundColor: '#FB8C00',
+    backgroundColor: colors.warningBanner,
     paddingTop: Platform.OS === 'ios' ? 56 : 16,
     paddingBottom: 12,
     paddingHorizontal: 16,
   },
   deviationBannerText: {
-    color: '#fff',
+    color: colors.onWarningBanner,
     fontWeight: '600',
     textAlign: 'center',
   },
@@ -1420,6 +1514,7 @@ const styles = StyleSheet.create({
   historyTitle: {
     fontSize: 20,
     fontWeight: '600',
+    color: colors.text,
   },
   historyLoading: {
     marginTop: 24,
@@ -1433,15 +1528,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#ccc',
+    borderBottomColor: colors.border,
   },
   runDate: {
     fontSize: 16,
     fontWeight: '600',
+    color: colors.text,
   },
   runStats: {
     fontSize: 14,
-    color: '#555',
+    color: colors.textSecondary,
     marginTop: 4,
   },
-});
+  });
+}

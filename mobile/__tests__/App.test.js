@@ -13,8 +13,17 @@
  * GraphHopper instance or SQLite/location hardware.
  */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react-native';
+import * as ReactNative from 'react-native';
 import { Alert } from 'react-native';
 import * as Location from 'expo-location';
+
+// Flattens an RN style prop (a value, or an array of values/falsy
+// entries/nested arrays -- exactly what style={[a, b && c]} produces)
+// into one plain object, the way the real native renderer does
+// internally but Jest's test renderer doesn't do for you.
+function flattenStyle(style) {
+  return Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+}
 
 // Captured by the watchPositionAsync mock below so a test can simulate a
 // real GPS ping by calling it directly -- App.js's handleStart flow calls
@@ -161,6 +170,34 @@ test('tapping an alternate route selects it and updates the displayed distance',
   await waitFor(() => screen.getByText(/Selected: #2/));
   expect(screen.getByText(/3\.02 km/)).toBeTruthy(); // rank 2's 3015.65m
   expect(screen.queryByText(/Selected: #1/)).toBeNull();
+});
+
+test('dark mode uses a brighter accent color for text/borders sitting directly on the background', async () => {
+  // Confirms the actual bug this was built to avoid, not just "some
+  // color changed": #2E7D32 (light mode's accentForeground) as text on
+  // this app's dark background computes to ~3.45:1 contrast, below WCAG
+  // AA's 4.5:1 minimum for normal text -- App.js's DARK_COLORS uses
+  // #66BB6A instead specifically because it clears that bar (~8:1). This
+  // asserts the actual rendered color is the dark-mode value, not merely
+  // that it differs from light mode.
+  jest.spyOn(ReactNative, 'useColorScheme').mockReturnValue('dark');
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  // "Regenerate" is a secondary-variant AppButton -- its text color IS
+  // accentForeground (the outline variant, sitting directly on the page
+  // background), unlike primary/destructive buttons whose text stays
+  // white in both themes (a solid filled surface, contrast is internal
+  // to the button regardless of page theme -- see App.js's own comment
+  // on why only accentForeground needed to change per theme).
+  const regenerateText = screen.getByText('Regenerate');
+  expect(flattenStyle(regenerateText.props.style).color).toBe('#66BB6A');
+
+  // The primary button's text, by contrast, correctly stays white --
+  // confirms this test isn't just catching "everything changed color."
+  const startRunText = screen.getByText('Start Run');
+  expect(flattenStyle(startRunText.props.style).color).toBe('#ffffff');
 });
 
 test('picking a distance preset regenerates the route requesting that exact distance', async () => {
