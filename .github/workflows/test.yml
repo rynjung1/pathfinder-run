@@ -1,6 +1,6 @@
 name: Tests
 
-# Every push and PR. Two independent jobs, one per half of the stack --
+# Every push and PR. Three independent jobs, one per part of the stack --
 # see each job's own comment for what it covers and why it's safe to run
 # with nothing else provisioned (no GraphHopper instance, no native
 # mobile runtime).
@@ -49,3 +49,24 @@ jobs:
           node-version: "20"
       - run: npm ci
       - run: npx jest
+
+  java-test:
+    # graphhopper-ext/'s unit tests (GreenspaceWayIds, GreenspaceTagParser)
+    # -- added alongside this job specifically because a real test suite
+    # nothing ever runs is close to no test suite at all; found this gap
+    # on the same backend sweep that led to actually writing these tests.
+    # No GraphHopper instance/graph-cache needed -- these are unit tests
+    # against real GraphHopper library types (SimpleBooleanEncodedValue,
+    # ReaderWay), not integration tests requiring a running server, so a
+    # plain JDK is all this job needs.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: graphhopper-ext
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"  # matches this project's actual requirement (config-ontario.yml, run-import.sh)
+      - run: mvn --batch-mode test

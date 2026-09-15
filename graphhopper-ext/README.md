@@ -108,3 +108,31 @@ modified server" estimate for this work as large as it was.
   established earlier this project: Westmount Road North (way
   `38896608`, confirmed crossing a greenspace polygon during the
   original `in_greenspace` work) is present in the computed set.
+
+## Tests
+
+Was zero automated coverage here at all until a backend sweep found the
+gap -- everything above was validated once, by hand, against a real
+import, not something a future change to this module would re-check on
+its own. `src/test/java/` now covers `GreenspaceWayIds` (the offline
+way-id set: load/contains/the missing-file error message) and
+`GreenspaceTagParser` (the actual per-way encoded-value logic) with real
+JUnit 5 tests -- no mocking library needed: `SimpleBooleanEncodedValue`
+and `ReaderWay` are both directly instantiable (the same
+`new SimpleBooleanEncodedValue(name)` + `.init(new
+EncodedValue.InitializerConfig())` pattern GraphHopper's own internals
+use), and `EdgeIntAccess` is a two-method interface trivial to fake with
+a plain in-memory map.
+
+```bash
+mvn test   # needs JDK 17+ on PATH/JAVA_HOME, same requirement as `mvn package` below
+```
+
+`GreenspaceImportRegistry` (the `ImportRegistry` wiring itself) and
+`PathfinderImporter` (the CLI entrypoint, which drives a real
+GraphHopper import end to end) are not unit tested -- the former needs a
+fake `EncodedValueLookup` to exercise its `TagParser`-factory branch
+meaningfully, the latter is realistically only testable via a real
+import (which is exactly what "Validated against," above, already
+covers by hand). Both are real gaps, not overlooked; named here rather
+than forcing a low-value test to close them.
