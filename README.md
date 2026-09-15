@@ -73,6 +73,8 @@ Not done yet — see [`deploy/README.md`](deploy/README.md) for the concrete pla
 
 ### App Store readiness
 
+For the actual order to do these in, not just the list of facts below, see [`docs/launch-checklist.md`](docs/launch-checklist.md).
+
 Beyond backend deployment, submitting to the App Store/Play Store needs:
 - **Apple Developer Program enrollment** ($99/year) and an App Store Connect account — not something code can do, needs to happen directly.
 - **A reachable production backend** — a release build can't point at `localhost`; this is the same VPS/domain blocker as backend deployment above.
