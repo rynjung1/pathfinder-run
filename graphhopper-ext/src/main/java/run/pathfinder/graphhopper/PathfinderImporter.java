@@ -74,8 +74,16 @@ public final class PathfinderImporter {
         gh.close();
     }
 
+    // Package-private, not private -- the one part of this class that's
+    // actually a pure function (a YAML file in, a GraphHopperConfig out,
+    // no GraphHopper import/GreenspaceWayIds/System.out involved), so
+    // it's genuinely unit-testable on its own despite this whole class
+    // being named as a real gap in graphhopper-ext/README.md's "Tests"
+    // section ("realistically only testable via a real import"). That
+    // note was about main() as a whole; this piece specifically isn't
+    // covered by that same limitation. See PathfinderImporterTest.
     @SuppressWarnings("unchecked")
-    private static GraphHopperConfig loadGraphHopperConfig(String configPath) throws Exception {
+    static GraphHopperConfig loadGraphHopperConfig(String configPath) throws Exception {
         ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
         Map<String, Object> root = yamlMapper.readValue(new File(configPath), Map.class);
         Map<String, Object> gh = (Map<String, Object>) root.get("graphhopper");

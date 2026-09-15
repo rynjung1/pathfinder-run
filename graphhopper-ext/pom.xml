@@ -36,6 +36,12 @@
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <graphhopper.version>9.1</graphhopper.version>
+    <!-- The exact version bundled inside the real graphhopper-web.jar
+         this project actually runs against (confirmed directly by
+         inspecting its META-INF/maven/.../pom.properties, not guessed;
+         see the jackson-databind/jackson-dataformat-yaml comments below
+         for why this has to be exact, not just "recent enough"). -->
+    <jackson.version>2.13.5</jackson.version>
   </properties>
 
   <dependencies>
@@ -48,21 +54,47 @@
     <!-- Jackson for reading the precomputed way-id JSON
          (data/greenspace_way_ids*.json): already a transitive dependency
          of graphhopper-core, pinned explicitly here only so the version is
-         intentional, not incidental. -->
+         intentional, not incidental.
+
+         Pinned to graphhopper-web.jar's own bundled version (2.13.5),
+         not the latest release; found a real bug from getting this
+         wrong: this used to say 2.17.1, newer than jackson-core's own
+         2.13.5 (pulled in transitively via graphhopper-core, unaffected
+         by this file since there was never an explicit jackson-core
+         dependency here at all). `mvn test`/`mvn package` resolve
+         dependencies purely from these declarations, independent of
+         whatever's actually inside graphhopper-web.jar, and a mixed
+         2.17.1-databind/2.13.5-core classpath is genuinely broken, not
+         just untidy: PathfinderImporterTest (added alongside this fix)
+         hit a real `NoSuchMethodError:
+         YAMLParser.createChildObjectContext` from it the moment a test
+         finally exercised YAML parsing, something no earlier test ever
+         did. The REAL production classpath (java -cp
+         graphhopper-web.jar:graphhopper-ext-1.0.0.jar, see run-import.sh)
+         was never actually broken by this; provided-scope dependencies
+         are never bundled into graphhopper-ext's own jar, so production
+         was always using graphhopper-web.jar's own internally-consistent
+         2.13.5 set for everything Jackson-related regardless of what
+         this file said; matching that version here now makes Maven's
+         compile/test classpath a true match of the real runtime
+         classpath, not just "some jar labeled jackson-databind." -->
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
-      <version>2.17.1</version>
+      <version>${jackson.version}</version>
       <scope>provided</scope>
     </dependency>
     <!-- For parsing config-ontario.yml directly (the same real config file
          production uses, not a hand-duplicated copy of its settings):
          provided scope, same reasoning; already on the runtime classpath
-         via graphhopper-web.jar's own bundled deps. -->
+         via graphhopper-web.jar's own bundled deps. Same version-pinning
+         reasoning as jackson-databind above; this is the one that
+         actually surfaced the mismatch (YAMLParser is defined here, not
+         in jackson-databind). -->
     <dependency>
       <groupId>com.fasterxml.jackson.dataformat</groupId>
       <artifactId>jackson-dataformat-yaml</artifactId>
-      <version>2.17.1</version>
+      <version>${jackson.version}</version>
       <scope>provided</scope>
     </dependency>
     <!-- Was zero test coverage here at all; found on a backend sweep.

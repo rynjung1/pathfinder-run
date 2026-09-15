@@ -128,11 +128,35 @@ a plain in-memory map.
 mvn test   # needs JDK 17+ on PATH/JAVA_HOME, same requirement as `mvn package` below
 ```
 
+`PathfinderImporter.loadGraphHopperConfig` (the pure YAML-config-parsing
+half of the importer -- a file in, a `GraphHopperConfig` out, no actual
+GraphHopper import triggered) is also covered now, in
+`PathfinderImporterTest`, against a fixture mirroring
+`config-ontario.yml`'s real shape -- made package-private specifically so
+a test could reach it. Finding a real test for this actually surfaced a
+real bug in this project's own `pom.xml`: `jackson-databind`/
+`jackson-dataformat-yaml` were pinned to `2.17.1`, newer than the
+`jackson-core` version (`2.13.5`) pulled in transitively via
+`graphhopper-core` -- Maven's own dependency resolution for `mvn test`
+was internally inconsistent, and the moment a test actually exercised
+YAML parsing (nothing had before this), it threw a real
+`NoSuchMethodError`. The real production classpath (`graphhopper-web.jar`
++ this project's own thin jar, see `run-import.sh`) was never actually
+broken by this -- `provided`-scope dependencies never get bundled into
+graphhopper-ext's own jar, so production always ran on
+`graphhopper-web.jar`'s own internally-consistent bundled Jackson set
+regardless of what this file said. Fixed by pinning both to `2.13.5` --
+the exact version actually bundled in `graphhopper-web.jar` (confirmed
+directly by inspecting its own `pom.properties`, not guessed) -- so
+Maven's compile/test classpath is now a true match of the real runtime
+one, not just "some jar labeled jackson-databind."
+
 `GreenspaceImportRegistry` (the `ImportRegistry` wiring itself) and
-`PathfinderImporter` (the CLI entrypoint, which drives a real
-GraphHopper import end to end) are not unit tested -- the former needs a
-fake `EncodedValueLookup` to exercise its `TagParser`-factory branch
-meaningfully, the latter is realistically only testable via a real
-import (which is exactly what "Validated against," above, already
-covers by hand). Both are real gaps, not overlooked; named here rather
-than forcing a low-value test to close them.
+`PathfinderImporter.main` (the actual GraphHopper-import-driving logic,
+as opposed to the config-parsing half now covered above) are still not
+unit tested -- the former needs a fake `EncodedValueLookup` to exercise
+its `TagParser`-factory branch meaningfully, the latter is realistically
+only testable via a real import (which is exactly what "Validated
+against," above, already covers by hand). Both are real gaps, not
+overlooked; named here rather than forcing a low-value test to close
+them.
