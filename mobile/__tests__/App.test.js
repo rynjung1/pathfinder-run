@@ -367,6 +367,60 @@ test('starting a run shows a live Recording indicator that updates as GPS points
   await waitFor(() => screen.getByText(/Paused.*0\.6\d km/));
 });
 
+test('backgrounding the app mid-run auto-pauses it, the same as tapping Pause', async () => {
+  // jest-expo's default AppState mock is an inert jest.fn() -- calling
+  // addEventListener returns a { remove } object but never actually
+  // invokes the registered listener, so there's no built-in way to
+  // simulate a real background transition. AppState is destructured as
+  // an *object* import (`import { AppState } from 'react-native'`),
+  // unlike useSafeAreaInsets's function import elsewhere in this file --
+  // App.js calls `AppState.addEventListener(...)` as a property access on
+  // that shared object every time, not a function reference captured once
+  // at import time, so spying on the method (rather than reassigning the
+  // whole export, which empirically doesn't reach App.js's binding -- see
+  // the safe-area-insets mock) does reach the real call. Verified
+  // empirically before relying on it, same discipline as that mock.
+  let appStateCallback = null;
+  jest.spyOn(ReactNative.AppState, 'addEventListener').mockImplementation((event, cb) => {
+    if (event === 'change') appStateCallback = cb;
+    return { remove: jest.fn() };
+  });
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  fireEvent.press(screen.getByText('Start Run'));
+  await waitFor(() => screen.getByText(/Recording.*0\.00 km/));
+  expect(appStateCallback).toBeTruthy();
+
+  await act(async () => {
+    watchCallback({ coords: { latitude: 43.4643, longitude: -80.5204 }, timestamp: Date.now() });
+  });
+  await act(async () => {
+    watchCallback({ coords: { latitude: 43.47, longitude: -80.5204 }, timestamp: Date.now() });
+  });
+  await waitFor(() => screen.getByText(/Recording.*0\.6\d km/));
+
+  // Simulate iOS backgrounding the app (no UIBackgroundMode: location, so
+  // JS suspends almost immediately) -- should auto-pause exactly like a
+  // manual Pause tap: same "Paused" label, same frozen distance, and the
+  // GPS watch subscription actually torn down (handlePause's real effect,
+  // not just a UI label change) so it isn't silently still "running" with
+  // stale state.
+  await act(async () => {
+    appStateCallback('background');
+  });
+  await waitFor(() => screen.getByText(/Paused.*0\.6\d km/));
+
+  // Coming back to the foreground must NOT auto-resume -- resuming a run
+  // silently would defeat the whole point (the user should consciously
+  // tap Resume, since real elapsed background time already happened).
+  await act(async () => {
+    appStateCallback('active');
+  });
+  expect(screen.getByText(/Paused.*0\.6\d km/)).toBeTruthy();
+});
+
 test('adaptive GPS sampling switches to the coarse profile after sustained stillness, and back to fine on real motion', async () => {
   // watchPositionAsync is a single jest.fn() shared across this whole
   // file (defined once in the jest.mock factory above) -- other tests

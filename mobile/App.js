@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, Text, View, ActivityIndicator, Alert, FlatList, TouchableOpacity, Image, useColorScheme } from 'react-native';
+import { StyleSheet, Text, View, ActivityIndicator, Alert, AppState, FlatList, TouchableOpacity, Image, useColorScheme } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
@@ -483,6 +483,29 @@ function AppInner() {
   useEffect(() => {
     return () => stopWatching();
   }, []);
+
+  // Auto-pause a running session the moment the app backgrounds -- found
+  // on a correctness sweep, a real gap distinct from the deliberate "no
+  // background tracking" v3 decision above: without this, backgrounding
+  // mid-run (checking a text, skipping a song) left runTimingRef's
+  // activeMs ticking on wall-clock time with zero GPS updates coming in
+  // (iOS suspends this app's JS almost immediately without
+  // UIBackgroundMode: location, which this app deliberately doesn't
+  // have), so returning and later ending/pausing the run would silently
+  // count that dead time as active running -- inflating durationMs
+  // relative to actualDistanceM and skewing the reported pace. Reuses
+  // handlePause verbatim (stops the watch, freezes activeMs at the real
+  // elapsed-while-foregrounded time) rather than a separate code path,
+  // so the user sees the same "Paused -- tap Resume" state and real
+  // number they'd get from pausing it themselves.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active' && sessionState === 'running') {
+        handlePause();
+      }
+    });
+    return () => subscription.remove();
+  }, [sessionState]);
 
   // Ticks once a second, only while actually running -- purely to force a
   // re-render so the live duration display (below, computed from
