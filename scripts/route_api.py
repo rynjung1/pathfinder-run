@@ -66,8 +66,15 @@ Endpoints:
 
     PATCH /closures/<id>  (rate limit: 20/min per IP) -- mark one report
     resolved. Requires the resolve_token issued when that report was
-    created -- ids are sequential and guessable, the token isn't (basic
-    clear mechanism; no time-based decay/expiry yet -- see closures.py).
+    created -- ids are sequential and guessable, the token isn't. This is
+    the immediate, someone-confirmed-it-in-person clear mechanism; a
+    separate, unconditional time-based decay also exists (closures.py's
+    expire_stale_closures, DEFAULT_CLOSURE_MAX_AGE_DAYS days, no PATCH
+    call needed) so a report nobody ever resolves doesn't block a segment
+    forever either. This line used to say the opposite (no decay
+    existed) -- true when originally written, stale once expiry shipped;
+    fixed on a sweep after noticing it contradicted closures.py's own,
+    correct module docstring.
     body: {"resolve_token": "..."}
     -> 200: {"id", "status": "resolved"}
     -> 400: missing/invalid resolve_token in the body
