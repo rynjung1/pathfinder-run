@@ -147,7 +147,24 @@ def _request(url, body=None, method="GET"):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=30) as resp:
         parsed = json.loads(resp.read())
-    if "paths" not in parsed:
+    # Checking the key exists isn't enough -- found on a sweep: a real,
+    # already-documented GraphHopper behavior near clipped-extract
+    # boundaries/sparse rural networks is a 200 OK with {"paths": []}, an
+    # empty list rather than a missing key. That passed this check before,
+    # then `parsed["paths"][0]` raised a bare IndexError -- neither
+    # URLError nor RuntimeError, so build_candidate's own
+    # `except (urllib.error.URLError, RuntimeError)` around this call
+    # never caught it, and it propagated all the way out of
+    # generate_candidates (which has no try/except of its own around each
+    # bearing), aborting the ENTIRE candidate batch instead of just
+    # skipping the one bad bearing -- directly contradicting the "one bad
+    # bearing shouldn't abort the whole batch" design build_candidate's
+    # own docstring describes. route_api.py's outer `except Exception`
+    # around generate_candidates does stop this from crashing the server,
+    # but still means a single bearing hitting this edge case fails the
+    # whole /route request (0 candidates) instead of returning however
+    # many of the other bearings would have succeeded.
+    if not parsed.get("paths"):
         raise RuntimeError(f"GraphHopper returned no path: {json.dumps(parsed)}")
     return parsed["paths"][0]
 
@@ -429,14 +446,33 @@ def polygon_area_m2(coords):
     that retraces the outbound leg almost exactly -- partially cancels its
     own area here, which is a feature for compactness_score below: a
     there-and-back that barely diverges should read as enclosing ~zero
-    area, not need separate overlap-detection logic."""
+    area, not need separate overlap-detection logic.
+
+    Includes the ring's closing edge (pts[-1] back to pts[0]) explicitly,
+    rather than assuming coords is already a closed ring (coords[0] ==
+    coords[-1]). Found on a sweep: combine_legs builds coords from two
+    INDEPENDENT GraphHopper requests (the outbound leg's plain CH request
+    and the return leg's ch.disable custom-model one) and just trusts the
+    return leg's last point exactly equals the outbound leg's first --
+    never verified anywhere. If GraphHopper snapped those two requests'
+    start points to even slightly different graph vertices, the old
+    version (summing only up to len(pts)-1, mathematically valid only for
+    an ALREADY-closed ring) computed a nonsense area -- confirmed with a
+    real, deliberately-unclosed 4-point ring: billions of m^2 instead of
+    the correct ~32,700 m^2, corrupting compactness_score enough that a
+    broken candidate would look like the best one by orders of magnitude.
+    This version is correct whether coords is pre-closed or not: when it
+    already is, the added closing term is exactly zero (pts[-1] == pts[0]
+    contributes x*y - x*y), so this changes nothing for every case that
+    was already working."""
     lat0 = coords[0][1]
     m_per_deg_lat, m_per_deg_lon = _local_meters_per_degree(lat0)
     pts = [(lon * m_per_deg_lon, lat * m_per_deg_lat) for lon, lat in coords]
+    n = len(pts)
     area = 0
-    for i in range(len(pts) - 1):
+    for i in range(n):
         x1, y1 = pts[i]
-        x2, y2 = pts[i + 1]
+        x2, y2 = pts[(i + 1) % n]
         area += x1 * y2 - x2 * y1
     return abs(area) / 2
 

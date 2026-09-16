@@ -102,6 +102,63 @@ def test_polygon_area_m2_self_retraced_line_is_zero():
     assert polygon_area_m2(ring) == 0
 
 
+def test_polygon_area_m2_handles_an_unclosed_ring_correctly():
+    # Found on a sweep: combine_legs (below) builds coords from two
+    # INDEPENDENT GraphHopper requests and just trusts the return leg's
+    # last point exactly equals the outbound leg's first -- never
+    # verified anywhere. The old implementation only summed shoelace
+    # terms up to len(pts)-1, which is mathematically valid ONLY for an
+    # already-closed ring (first point == last point) -- given an
+    # unclosed one, it silently returned a nonsense area instead of
+    # either closing it or raising.
+    #
+    # Deliberately NOT anchored at lon=0/lat=0 (unlike the tests above) --
+    # the shoelace formula's closing-edge term (pts[-1] to pts[0]) is a
+    # cross product that's trivially zero whenever either endpoint sits at
+    # local-meters (0, 0), which happens exactly when a ring's coordinates
+    # include lon=0, lat=0. A first version of this test used exactly
+    # that (an easy mistake, caught only by manually verifying it
+    # actually failed against the pre-fix code before trusting it) and
+    # passed even against the OLD, buggy implementation for that reason --
+    # it never actually exercised the missing closing term at all. Using
+    # a real, off-origin location (Waterloo, matching this test suite's
+    # own convention elsewhere) avoids that trap.
+    base_lat, base_lon = 43.4643, -80.5204
+    side_deg = 0.01
+    m_per_deg_lat, m_per_deg_lon = _local_meters_per_degree(base_lat)
+    expected_area_m2 = (side_deg * m_per_deg_lat) * (side_deg * m_per_deg_lon)
+    unclosed_ring = [
+        [base_lon, base_lat],
+        [base_lon + side_deg, base_lat],
+        [base_lon + side_deg, base_lat + side_deg],
+        [base_lon, base_lat + side_deg],
+    ]  # no closing point back to [base_lon, base_lat]
+    assert polygon_area_m2(unclosed_ring) == pytest.approx(expected_area_m2, rel=1e-6)
+
+
+def test_polygon_area_m2_matches_between_a_pre_closed_and_equivalent_unclosed_ring():
+    # The closing-edge fix must be a genuine no-op for every ring that was
+    # already correct (pts[-1] == pts[0] contributes exactly zero to the
+    # added term) -- this is what makes the fix safe rather than a
+    # different-but-still-wrong formula. Off-origin for the same reason as
+    # the test above (an on-origin version of this exact comparison would
+    # ALSO have passed under the old, buggy code by the same coincidence,
+    # so it would have proven nothing) -- confirmed directly: with these
+    # coordinates, the OLD implementation gives a materially different,
+    # wrong number for the unclosed ring here (~3.6 billion m^2 instead of
+    # ~2.1 million), so this comparison genuinely depends on the fix.
+    base_lat, base_lon = 43.4643, -80.5204
+    closed_ring = [
+        [base_lon, base_lat],
+        [base_lon + 0.02, base_lat + 0.005],
+        [base_lon + 0.015, base_lat + 0.02],
+        [base_lon, base_lat + 0.01],
+        [base_lon, base_lat],
+    ]
+    unclosed_ring = closed_ring[:-1]
+    assert polygon_area_m2(closed_ring) == pytest.approx(polygon_area_m2(unclosed_ring), rel=1e-12)
+
+
 # --- compactness_score ---------------------------------------------------
 
 def _circle_ring(center_lat, center_lon, radius_m, n=360):
@@ -161,6 +218,51 @@ def test_combine_legs_dedupes_shared_far_point():
     outbound = {"points": {"coordinates": [[0, 0], [1, 1], [2, 2]]}}
     return_leg = {"points": {"coordinates": [[2, 2], [3, 3]]}}
     assert combine_legs(outbound, return_leg) == [[0, 0], [1, 1], [2, 2], [3, 3]]
+
+
+def test_combine_legs_result_still_scores_correctly_when_the_return_leg_snaps_short_of_the_true_start():
+    # The actual real-world trigger for the polygon_area_m2 bug above:
+    # combine_legs trusts the return leg's last point IS the outbound
+    # leg's first point, but they come from two independent GraphHopper
+    # requests -- nothing anywhere verifies GraphHopper snapped both to
+    # the identical graph vertex. Here the return leg's route ends a few
+    # meters short of the true start (a plausible real snapping mismatch,
+    # not a huge error), so combine_legs' own result is a technically
+    # unclosed ring. polygon_area_m2 (fed this real combine_legs output,
+    # not a hand-built ring like the tests above) must still compute a
+    # sane, roughly-correct area instead of the nonsense the old
+    # implementation produced for exactly this shape of input. Off-origin
+    # for the same reason as the tests above -- confirmed directly this
+    # scenario gives the OLD code ~54.7 million m^2 for what should be
+    # ~897,000 m^2, a ~61x error, not just a rounding difference.
+    base_lat, base_lon = 43.4643, -80.5204
+    side_deg = 0.01
+    m_per_deg_lat, m_per_deg_lon = _local_meters_per_degree(base_lat)
+    expected_area_m2 = (side_deg * m_per_deg_lat) * (side_deg * m_per_deg_lon)
+    outbound = {
+        "points": {
+            "coordinates": [
+                [base_lon, base_lat],
+                [base_lon + side_deg, base_lat],
+                [base_lon + side_deg, base_lat + side_deg],
+            ]
+        }
+    }
+    # Ends ~0.0001 deg (roughly 11-15m at this latitude) short of the true
+    # start [base_lon, base_lat] -- a plausible real snapping discrepancy,
+    # not a contrived huge gap.
+    return_leg = {
+        "points": {
+            "coordinates": [
+                [base_lon + side_deg, base_lat + side_deg],
+                [base_lon, base_lat + side_deg],
+                [base_lon + 0.0001, base_lat + 0.0001],
+            ]
+        }
+    }
+    combined = combine_legs(outbound, return_leg)
+    assert combined[-1] != combined[0]  # confirms this ring is genuinely unclosed
+    assert polygon_area_m2(combined) == pytest.approx(expected_area_m2, rel=0.02)
 
 
 # --- used_way_ids / used_way_segments ---------------------------------------
