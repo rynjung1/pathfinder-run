@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { Component, useState, useEffect, useMemo, useRef } from 'react';
 import { StyleSheet, Text, View, ActivityIndicator, Alert, AppState, FlatList, TouchableOpacity, Image, useColorScheme } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
@@ -379,6 +379,130 @@ export async function fetchWithTimeout(url, options = {}) {
   }
 }
 
+// Found on the same sweep, in the same two call chains fetchWithTimeout
+// already protects (generateRoute, handleReportClosure), one step
+// earlier: Location.getCurrentPositionAsync has no timeout option at all
+// (checked directly against expo-location's own LocationOptions type --
+// unlike fetch, there's no AbortController-style cancellation for it
+// either), so on a weak/no GPS fix (indoors, underground, a simulator
+// with no location set) it can hang indefinitely -- both callers already
+// show a full-screen spinner with no cancel button at this point, so
+// this was the exact same "stuck forever, force-quit is the only way
+// out" bug fetchWithTimeout was built to eliminate, just reachable one
+// step earlier. Promise.race is the only mechanism available here: it
+// can't cancel the underlying native location request the way aborting
+// a fetch does, but it does unblock the UI and let the user retry, which
+// is the actual user-facing problem.
+const LOCATION_TIMEOUT_MS = 15000;
+
+export function getCurrentPositionWithTimeout() {
+  // A bug in this fix's own first draft, caught by Jest's own "worker
+  // failed to exit gracefully" warning after adding this: the timer
+  // promise's setTimeout was never cleared once the OTHER side of the
+  // race won (the normal, fast-GPS-fix case) -- it kept firing 15s later
+  // regardless, on every single call, harmlessly rejecting an already-
+  // settled Promise.race in production, but leaking a live timer for the
+  // full 15s each time. .finally() clears it whichever side wins, the
+  // same discipline fetchWithTimeout already uses for its AbortController
+  // timer.
+  let timeoutId;
+  const timeout = new Promise((_resolve, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`Location request timed out after ${LOCATION_TIMEOUT_MS / 1000}s`)),
+      LOCATION_TIMEOUT_MS
+    );
+  });
+  return Promise.race([Location.getCurrentPositionAsync({}), timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+// Found on a sweep, directly motivated by this session's own real
+// "Property 'createStyles' doesn't exist" bug report: without a top-level
+// error boundary, ANY uncaught render-time exception anywhere in
+// AppInner's tree crashes the whole app. In dev that showed as a redbox
+// (recoverable, with a real stack trace) -- but a production release
+// build has no redbox and no crash reporting (see deploy/README.md's
+// documented decision), so the exact same class of bug would instead
+// silently crash to a blank/white screen with zero diagnostic trail and
+// no way to recover short of force-quitting, discarding any in-progress
+// run. React error boundaries must be class components (no hook
+// equivalent exists as of this React version) -- this is the ONE class
+// component in an otherwise all-hooks file, for that reason alone.
+// Deliberately minimal/dependency-free (no useSafeAreaInsets, no theme
+// colors): this is the fallback for when something has ALREADY gone
+// wrong, so it can't risk depending on anything that might itself be
+// broken. "Try Again" resets the boundary's own state to re-render the
+// tree fresh, the same recovery a force-quit-and-relaunch would give
+// without actually losing the app process -- it won't help if the same
+// input keeps triggering the same bug, but costs nothing to offer first.
+export class ErrorBoundary extends Component {
+  state = { error: null };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <View style={errorBoundaryStyles.container}>
+          <Text style={errorBoundaryStyles.title}>Something went wrong</Text>
+          <Text style={errorBoundaryStyles.message}>
+            {String(this.state.error.message || this.state.error)}
+          </Text>
+          <TouchableOpacity
+            style={errorBoundaryStyles.button}
+            onPress={() => this.setState({ error: null })}
+            accessibilityRole="button"
+            accessibilityLabel="Try Again"
+          >
+            <Text style={errorBoundaryStyles.buttonText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// Deliberately its own tiny StyleSheet, hardcoded, not createStyles(colors,
+// insets) -- see the ErrorBoundary comment above: this has to render even
+// if the theme system itself is what's broken, so it can't call into it.
+const errorBoundaryStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingTop: 48, // a fixed approximation of a safe-area top inset, not the real one -- see above for why this can't use useSafeAreaInsets
+    backgroundColor: '#FFFFFF',
+  },
+  title: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1B1B1B',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  message: {
+    fontSize: 14,
+    color: '#5B5B5B',
+    marginBottom: 24,
+    textAlign: 'center',
+  },
+  button: {
+    backgroundColor: '#2E7D32',
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    borderRadius: 10,
+    minHeight: 44, // real tap-target minimum, same standard applied elsewhere in this file
+  },
+  buttonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+});
+
 // Wraps AppInner in SafeAreaProvider -- required for useSafeAreaInsets
 // (AppInner, below) to have anything to read from. Split out from
 // AppInner rather than one component, since a component can't consume
@@ -386,7 +510,9 @@ export async function fetchWithTimeout(url, options = {}) {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AppInner />
+      <ErrorBoundary>
+        <AppInner />
+      </ErrorBoundary>
     </SafeAreaProvider>
   );
 }
@@ -441,6 +567,11 @@ function AppInner() {
   // db.js's device id.
   const runUuidRef = useRef(null);
 
+  // Shown once, before the very first OS location-permission dialog ever
+  // appears for this install -- see the mount effect below for why this
+  // needs no persistent storage of its own.
+  const [showLocationPrimer, setShowLocationPrimer] = useState(false);
+
   // idle | generating | ready | running | paused | done
   const [sessionState, setSessionState] = useState('idle');
   const [initialRegion, setInitialRegion] = useState(null);
@@ -488,6 +619,16 @@ function AppInner() {
   const [showHistory, setShowHistory] = useState(false);
   const [pastRuns, setPastRuns] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  // Found on a sweep: a failed getRuns() (local SQLite read) left pastRuns
+  // at [] (its initial value) with only an Alert shown -- once dismissed,
+  // the render fell straight into the ordinary "No runs saved yet --
+  // finish a run to see it here" empty state, indistinguishable from
+  // actually having zero history. For an app whose whole value is durable
+  // local run history, telling someone "no runs saved yet" when the real
+  // cause is a failed read is a materially worse, actively misleading
+  // message -- this tracks that distinction so the render can tell them
+  // what really happened instead.
+  const [historyLoadFailed, setHistoryLoadFailed] = useState(false);
   const [deletingData, setDeletingData] = useState(false);
   // Which past run's replay is showing, or null for the plain list --
   // §2's "route replay-on-map for a past run." Holds the whole run record
@@ -505,9 +646,36 @@ function AppInner() {
   // Auto-fetch once on launch, purely so this screen has something to show
   // without requiring a tap first (useful for a quick screenshot/demo). The
   // button below still lets you regenerate on demand.
+  //
+  // Found on a sweep: this used to call generateRoute() directly and
+  // unconditionally -- which means the OS location-permission dialog
+  // could appear the instant the app opens, with zero in-app context
+  // first, since generateRoute's own first move is
+  // requestForegroundPermissionsAsync. That's the exact "priming" anti-
+  // pattern Apple's App Review guidance and general mobile permission UX
+  // both call out: a brand-new user has no idea yet why a running app
+  // wants their location before they've even seen the app do anything.
+  // getForegroundPermissionsAsync's status is 'undetermined' ONLY before
+  // the system dialog has ever been shown to this user -- once it's been
+  // answered either way (granted or denied), it's never 'undetermined'
+  // again, so this needs no new persistent storage to know whether
+  // priming has "already happened": the OS permission state itself
+  // already encodes that.
   useEffect(() => {
-    generateRoute();
+    (async () => {
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status === 'undetermined') {
+        setShowLocationPrimer(true);
+      } else {
+        generateRoute();
+      }
+    })();
   }, []);
+
+  function acknowledgeLocationPrimer() {
+    setShowLocationPrimer(false);
+    generateRoute();
+  }
 
   // Stop the location watch on unmount no matter what state we're in --
   // otherwise a hot-reload or navigating away mid-run leaks a live GPS
@@ -627,7 +795,7 @@ function AppInner() {
         return;
       }
 
-      const position = await Location.getCurrentPositionAsync({});
+      const position = await getCurrentPositionWithTimeout();
       const { latitude, longitude } = position.coords;
 
       const response = await fetchWithTimeout(`${API_BASE_URL}/route`, {
@@ -988,7 +1156,7 @@ function AppInner() {
     try {
       let coord = liveCoord;
       if (!coord) {
-        const position = await Location.getCurrentPositionAsync({});
+        const position = await getCurrentPositionWithTimeout();
         coord = { latitude: position.coords.latitude, longitude: position.coords.longitude };
       }
       const response = await fetchWithTimeout(`${API_BASE_URL}/closures`, {
@@ -1013,6 +1181,7 @@ function AppInner() {
     setShowHistory(true);
     setSelectedRun(null);
     setLoadingHistory(true);
+    setHistoryLoadFailed(false);
     try {
       const runs = await getRuns();
       // Merge in anything synced under this device id that the local
@@ -1046,6 +1215,7 @@ function AppInner() {
       setPastRuns(merged);
     } catch (err) {
       showErrorAlert('Could not load your past runs', 'Check your connection and try again.', err);
+      setHistoryLoadFailed(true);
     } finally {
       setLoadingHistory(false);
     }
@@ -1230,6 +1400,22 @@ function AppInner() {
     );
   }
 
+  if (showLocationPrimer) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.placeholder}>
+          <Text style={styles.placeholderTitle}>Before we start</Text>
+          <Text style={styles.placeholderText}>
+            Pathfinder Run needs your location to generate a running route from where you are, and to track your
+            position, distance, and pace while you run. You'll be asked to allow this next.
+          </Text>
+          <AppButton title="Continue" variant="primary" onPress={acknowledgeLocationPrimer} />
+        </View>
+        <StatusBar style="auto" />
+      </View>
+    );
+  }
+
   if (showHistory) {
     return (
       <View style={styles.container}>
@@ -1239,6 +1425,11 @@ function AppInner() {
         </View>
         {loadingHistory ? (
           <ActivityIndicator style={styles.historyLoading} size="large" color={colors.accentForeground} />
+        ) : historyLoadFailed ? (
+          <View style={styles.placeholder}>
+            <Text style={styles.placeholderText}>Couldn't load your past runs. Check your connection and try again.</Text>
+            <AppButton title="Retry" variant="secondary" onPress={openHistory} />
+          </View>
         ) : pastRuns.length === 0 ? (
           <View style={styles.placeholder}>
             <Text style={styles.placeholderText}>No runs saved yet -- finish a run to see it here.</Text>
@@ -1541,7 +1732,14 @@ function createStyles(colors, insets = { top: 0, bottom: 0, left: 0, right: 0 })
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
+    gap: 16, // only the load-failed-retry and location-primer states have more than one child; a no-op everywhere else with just a single Text
     backgroundColor: colors.background,
+  },
+  placeholderTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.text,
+    textAlign: 'center',
   },
   placeholderText: {
     fontSize: 16,

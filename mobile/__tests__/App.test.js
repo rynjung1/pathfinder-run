@@ -106,7 +106,7 @@ jest.mock('expo-file-system', () => {
   };
 });
 
-import App, { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../App';
+import App, { fetchWithTimeout, FETCH_TIMEOUT_MS, getCurrentPositionWithTimeout, ErrorBoundary } from '../App';
 import { deleteAllRuns, getRuns, saveRun } from '../db';
 import MapView from 'react-native-maps';
 import { __copyMock, __deleteMock } from 'expo-file-system';
@@ -153,6 +153,44 @@ test('rank 1 is selected by default after a route is generated', async () => {
   render(<App />);
   await waitFor(() => screen.getByText(/Selected: #1/));
   expect(screen.getByText(/2\.99 km/)).toBeTruthy(); // rank 1's 2988.28m
+});
+
+test('a brand-new install (permission never asked before) sees an in-app explanation before the OS dialog, not a surprise system prompt on launch', async () => {
+  // Found on a sweep: the mount effect used to call generateRoute()
+  // (whose own first move is requestForegroundPermissionsAsync)
+  // completely unconditionally -- so a brand-new user could see the OS
+  // location dialog the instant the app opened, before the app had shown
+  // them anything explaining why. 'undetermined' is expo-location's own
+  // status value for "the system dialog has never been shown to this
+  // user" -- distinct from 'granted'/'denied', both of which mean it's
+  // already been resolved once.
+  Location.getForegroundPermissionsAsync.mockResolvedValueOnce({ status: 'undetermined' });
+
+  render(<App />);
+
+  await waitFor(() => screen.getByText('Before we start'));
+  // No network request yet -- the whole point is that permission (and
+  // therefore route generation) doesn't happen until the user
+  // acknowledges the explanation.
+  expect(global.fetch).not.toHaveBeenCalled();
+  expect(screen.queryByText(/Selected: #1/)).toBeNull();
+
+  fireEvent.press(screen.getByText('Continue'));
+
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  expect(Location.requestForegroundPermissionsAsync).toHaveBeenCalled();
+});
+
+test('an already-resolved permission (granted or denied in a prior session) skips the primer entirely', async () => {
+  // The default mock everywhere else in this file already resolves
+  // 'granted' and every other test proceeds straight to route generation
+  // with no primer screen ever appearing -- this test makes that
+  // "already resolved -> skip priming" behavior explicit and named,
+  // rather than leaving it as an implicit side effect of every other
+  // test's shared default mock.
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  expect(screen.queryByText('Before we start')).toBeNull();
 });
 
 test('a non-JSON error response (e.g. a real 429 from flask-limiter) shows a clean message, not a raw parse error', async () => {
@@ -432,12 +470,18 @@ test('tapping Start Run does not enter Recording if location permission was revo
   // zero-distance run on End Run. getForegroundPermissionsAsync (checked
   // in startWatching, distinct from the requestForegroundPermissionsAsync
   // prompt in generateRoute) is what actually reflects that reversion.
-  Location.getForegroundPermissionsAsync.mockResolvedValueOnce({ status: 'denied' });
   jest.spyOn(Alert, 'alert').mockImplementation(() => {});
 
   render(<App />);
   await waitFor(() => screen.getByText(/Selected: #1/));
 
+  // Queued only now, not before render -- the mount effect's own
+  // permission-priming check (getForegroundPermissionsAsync, added by
+  // the same sweep as this test) already consumes one call before this
+  // point; queuing 'denied' any earlier would apply to THAT call instead
+  // of the one this test actually means to target (startWatching's, when
+  // Start Run is pressed below).
+  Location.getForegroundPermissionsAsync.mockResolvedValueOnce({ status: 'denied' });
   fireEvent.press(screen.getByText('Start Run'));
 
   await waitFor(() =>
@@ -672,6 +716,32 @@ test('Delete All My Data also deletes each run\'s snapshot file, not just the da
   expect(__deleteMock.mock.calls[0][0].uri).toBe('file:///mock-documents/run-snapshots/a.png');
 });
 
+test('a failed history load shows a distinct, retryable error -- not the ordinary "no runs yet" empty state', async () => {
+  // Found on a sweep: a failed getRuns() (a real local SQLite read
+  // failure) used to leave pastRuns at its initial [] with only an
+  // Alert shown -- once dismissed, the render fell straight into the
+  // ordinary "No runs saved yet" empty state, indistinguishable from
+  // genuinely having zero history. For an app whose whole value is
+  // durable local run history, that's an actively misleading message,
+  // not just a missing nice-to-have.
+  jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+  getRuns.mockRejectedValueOnce(new Error('database is locked'));
+
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  fireEvent.press(screen.getByText('Past Runs'));
+
+  await waitFor(() => expect(Alert.alert).toHaveBeenCalled());
+  expect(screen.getByText(/Couldn't load your past runs/)).toBeTruthy();
+  expect(screen.queryByText('No runs saved yet -- finish a run to see it here.')).toBeNull();
+
+  // Retry must actually be able to succeed, not just redisplay the same
+  // error state -- proves this is real recovery, not a dead-end button.
+  getRuns.mockResolvedValueOnce([]);
+  fireEvent.press(screen.getByText('Retry'));
+  await waitFor(() => screen.getByText('No runs saved yet -- finish a run to see it here.'));
+});
+
 describe('fetchWithTimeout', () => {
   // Found on a sweep: none of this file's 5 fetch() calls had any
   // timeout -- plain fetch() never times out on its own in React Native,
@@ -728,5 +798,116 @@ describe('fetchWithTimeout', () => {
     // harmlessly in this case, but a leaked timer per successful request
     // over a long session is still worth not having).
     expect(jest.getTimerCount()).toBe(0);
+  });
+});
+
+describe('getCurrentPositionWithTimeout', () => {
+  // Found on the same sweep as fetchWithTimeout, in the same two call
+  // chains it already protects (generateRoute, handleReportClosure), one
+  // step earlier: Location.getCurrentPositionAsync has no timeout option
+  // at all (confirmed directly against expo-location's own LocationOptions
+  // type -- not just assumed), so it could hang indefinitely on a weak/no
+  // GPS fix, stuck behind a full-screen spinner with no cancel button.
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('rejects with a clear message if the GPS fix never arrives', async () => {
+    jest.useFakeTimers();
+    // A promise that never settles -- the actual failure mode being
+    // guarded against (a real device stuck acquiring a fix), not just a
+    // slow-but-eventually-resolving one.
+    Location.getCurrentPositionAsync.mockReturnValueOnce(new Promise(() => {}));
+
+    const promise = getCurrentPositionWithTimeout();
+    const assertion = expect(promise).rejects.toThrow('Location request timed out after 15s');
+    await jest.advanceTimersByTimeAsync(15000);
+    await assertion;
+  });
+
+  test('resolves normally well within the timeout, and does not leave a stray timer behind', async () => {
+    jest.useFakeTimers();
+    Location.getCurrentPositionAsync.mockResolvedValueOnce({
+      coords: { latitude: 43.4643, longitude: -80.5204 },
+      timestamp: Date.now(),
+    });
+
+    const position = await getCurrentPositionWithTimeout();
+
+    expect(position.coords.latitude).toBe(43.4643);
+    // A first version of this fix used Promise.race with no cleanup at
+    // all -- caught by Jest's own "a worker process has failed to exit
+    // gracefully" warning after adding it, since the timer promise's
+    // setTimeout kept firing 15s later regardless of which side of the
+    // race won. This is what that regression would show up as here.
+    expect(jest.getTimerCount()).toBe(0);
+  });
+});
+
+describe('ErrorBoundary', () => {
+  // Found on a sweep, directly motivated by this session's own real
+  // "Property 'createStyles' doesn't exist" bug report: without a
+  // top-level error boundary, ANY uncaught render-time exception anywhere
+  // in the tree crashes the whole app to a blank screen in a production
+  // build (no redbox, no crash reporting -- see deploy/README.md's
+  // documented decision), with zero recovery short of force-quitting.
+  test('catches a render error and shows a recoverable fallback screen', () => {
+    // React logs the caught error to console.error by default (expected,
+    // documented behavior of error boundaries, not a real test failure)
+    // -- silenced so it doesn't clutter this test's real output.
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    function Bomb() {
+      throw new Error('kaboom');
+    }
+    const { getByText } = render(
+      <ErrorBoundary>
+        <Bomb />
+      </ErrorBoundary>
+    );
+
+    expect(getByText('Something went wrong')).toBeTruthy();
+    // The real thrown message is shown, not a generic placeholder --
+    // this app has no crash reporting, so this alert-equivalent text is
+    // the only diagnostic trail a user could ever relay back (the exact
+    // reasoning showErrorAlert elsewhere in this file already applies).
+    expect(getByText('kaboom')).toBeTruthy();
+  });
+
+  test('renders children normally when nothing throws', () => {
+    const { getByText, queryByText } = render(
+      <ErrorBoundary>
+        <ReactNative.Text>all fine</ReactNative.Text>
+      </ErrorBoundary>
+    );
+    expect(getByText('all fine')).toBeTruthy();
+    expect(queryByText('Something went wrong')).toBeNull();
+  });
+
+  test('Try Again actually recovers once the underlying problem is gone, not just resets to the same crash', () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    // A real transient failure this simulates: e.g. a null ref that's
+    // populated by the time the user retries. Proving recovery needs a
+    // component that stops throwing on a later render, not one that
+    // always throws (which would only prove the boundary can catch an
+    // error, not that "Try Again" leads anywhere better).
+    let shouldThrow = true;
+    function Flaky() {
+      if (shouldThrow) throw new Error('temporary glitch');
+      return <ReactNative.Text>recovered</ReactNative.Text>;
+    }
+
+    const { getByText, queryByText } = render(
+      <ErrorBoundary>
+        <Flaky />
+      </ErrorBoundary>
+    );
+    expect(getByText('Something went wrong')).toBeTruthy();
+
+    shouldThrow = false;
+    fireEvent.press(getByText('Try Again'));
+
+    expect(getByText('recovered')).toBeTruthy();
+    expect(queryByText('Something went wrong')).toBeNull();
   });
 });
