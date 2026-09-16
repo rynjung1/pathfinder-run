@@ -3,32 +3,29 @@
 Everything needed to submit Pathfinder Run to the App Store already
 exists somewhere in this repo — this file's only job is putting it in
 the right ORDER, since `README.md`'s "App Store readiness" section lists
-facts, not a sequence. Follows the dependency chain you've already
-decided on: Apple Developer Program first, VPS after, since there's no
-point paying for/managing a server before knowing the app can actually
-ship.
+facts, not a sequence. Followed the dependency chain originally decided
+on (Apple Developer Program first, VPS after) — moot now that step 1
+turned out to already be satisfied (see below), but VPS/domain (step 4)
+is genuinely unblocked and ready to start now.
 
-## 1. Right now — start Apple Developer Program enrollment
+## 1. ~~Apple Developer Program enrollment~~ — already done
 
-The long pole, not something either of us can speed up. Apple's own
-guidance says 24–48 hours; real 2026 reports from other developers show
-waits of 2–7+ weeks are common, sometimes longer, especially if a name/
-address mismatch triggers manual ID verification. Every day this isn't
-started is a day added to however long the queue actually is.
+Turned out this Apple ID is already the Account Holder of an active
+membership (discovered 2026-09-16 when a fresh enroll attempt was
+rejected with "Your Apple Account is already associated with the
+Account Holder of a membership") — no multi-week wait, no $99 payment,
+no ID verification needed. The only action required was accepting an
+updated Program License Agreement (a banner at developer.apple.com/account)
+to regain working access to Certificates/IDs/Profiles and App Store
+Connect.
 
-- Go to developer.apple.com/programs/enroll, sign in with an Apple ID
-  that has 2FA enabled
-- Use your real legal name (exactly as on ID) and a real street address
-  (no P.O. box)
-- Pay the $99/year fee
-- If Apple asks for photo ID verification, respond immediately — this
-  is the single biggest lever on how long the wait actually is
+If this is ever stale (a future renewal lapses, or a different Apple ID
+is used), the original guidance was: developer.apple.com/programs/enroll,
+real legal name/address matching ID, $99/year, respond fast to any photo
+ID verification request (2026 reports showed 2–7+ week waits common for
+a genuinely new enrollment).
 
-Nothing else in this checklist is blocked on this finishing — only the
-final build/submit steps (5+) are. Everything below it can happen while
-you wait.
-
-## 2. While waiting — nothing left to prep, this is genuinely done
+## 2. Already done — nothing left to prep here
 
 Checked as of this session: privacy policy published (with a real
 contact email), Privacy Manifest, export compliance, delete-my-data,
@@ -41,7 +38,7 @@ App Store listing copy, Data Safety/App Privacy answers, and two real
 - [`docs/app-store-screenshots/`](app-store-screenshots/) — two real
   screenshots (light + dark), correctly sized
 
-## 3. Once Apple Developer Program is approved
+## 3. Right now — App Store Connect setup
 
 1. Confirm access at appstoreconnect.apple.com — create the app record
    there (bundle id `com.rynjung.pathfinderrun`, matching
@@ -56,7 +53,7 @@ App Store listing copy, Data Safety/App Privacy answers, and two real
    field: https://claude.ai/code/artifact/b1f491f0-5c0c-4454-8c93-17ca88adf517
    — fill in the real contact email there too if it's ever changed.
 
-## 4. VPS + domain (your stated next step after #1)
+## 4. VPS + domain — also unblocked now, can run in parallel with #3
 
 Full plan already written and ready to execute, not just planned — see
 [`deploy/README.md`](../deploy/README.md) for the complete sequence
