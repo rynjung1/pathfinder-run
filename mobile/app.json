@@ -7,9 +7,8 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Pathfinder Run uses your location to generate a running route starting from where you are, and to track your position, distance, and pace while you run.",
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.rynjung.pathfinderrun",
@@ -52,7 +51,10 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Pathfinder Run uses your current location to generate a running route starting from where you are."
+          "locationWhenInUsePermission": "Pathfinder Run uses your location to generate a running route starting from where you are, and to track your position, distance, and pace while you run.",
+          "locationAlwaysAndWhenInUsePermission": "Pathfinder Run does not use background location -- only \"While Using the App\" access is ever requested.",
+          "locationAlwaysPermission": "Pathfinder Run does not use background location -- only \"While Using the App\" access is ever requested.",
+          "motionUsagePermission": "Pathfinder Run reads your device's accelerometer during a run to adjust how often it checks GPS -- not to track steps, workouts, or activity type."
         }
       ],
       "expo-sqlite",
