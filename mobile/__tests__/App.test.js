@@ -106,7 +106,7 @@ jest.mock('expo-file-system', () => {
   };
 });
 
-import App from '../App';
+import App, { fetchWithTimeout, FETCH_TIMEOUT_MS } from '../App';
 import { deleteAllRuns, getRuns, saveRun } from '../db';
 import MapView from 'react-native-maps';
 import { __copyMock, __deleteMock } from 'expo-file-system';
@@ -670,4 +670,63 @@ test('Delete All My Data also deletes each run\'s snapshot file, not just the da
   await waitFor(() => expect(deleteAllRuns).toHaveBeenCalledTimes(1));
   expect(__deleteMock).toHaveBeenCalledTimes(1); // only for run 'a' -- run 'b' had nothing to delete
   expect(__deleteMock.mock.calls[0][0].uri).toBe('file:///mock-documents/run-snapshots/a.png');
+});
+
+describe('fetchWithTimeout', () => {
+  // Found on a sweep: none of this file's 5 fetch() calls had any
+  // timeout -- plain fetch() never times out on its own in React Native,
+  // so a hung connection (weak signal, a captive portal, a cellular
+  // network that silently drops packets) left 3 of them stuck behind a
+  // full-screen spinner with no cancel button forever, with no way out
+  // short of force-quitting the app. Tested directly against the
+  // exported helper, not through a full <App /> render + waitFor --
+  // waitFor's own internal polling uses real timers, which fights
+  // jest.useFakeTimers() in ways that would make this test fragile for
+  // no real benefit; fetchWithTimeout has no React/component dependency
+  // at all (confirmed: it only touches fetch/AbortController/setTimeout,
+  // all plain JS globals), so it doesn't need one.
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test('aborts and rejects with a clear message if the request never settles', async () => {
+    jest.useFakeTimers();
+    global.fetch = jest.fn(
+      (url, options) =>
+        new Promise((_resolve, reject) => {
+          // Mirrors the real contract fetchWithTimeout depends on: real
+          // fetch implementations reject with a DOMException named
+          // 'AbortError' when their signal aborts -- a naive mock
+          // returning a promise that just never settles would make this
+          // test pass for the wrong reason (fetchWithTimeout awaiting
+          // fetch() forever, same as the bug this fixes) instead of
+          // actually exercising the timeout.
+          options.signal.addEventListener('abort', () => {
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        })
+    );
+
+    const promise = fetchWithTimeout('http://example.com/route');
+    const assertion = expect(promise).rejects.toThrow(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
+    await jest.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS);
+    await assertion;
+  });
+
+  test('resolves normally well within the timeout, and does not leave a stray timer behind', async () => {
+    jest.useFakeTimers();
+    global.fetch = jest.fn(() => Promise.resolve({ ok: true, status: 200 }));
+
+    const response = await fetchWithTimeout('http://example.com/route');
+
+    expect(response.ok).toBe(true);
+    // If the setTimeout scheduled internally wasn't cleared on the
+    // success path, it would still be pending here -- a real leak (it
+    // would fire later and call an already-aborted controller's abort(),
+    // harmlessly in this case, but a leaked timer per successful request
+    // over a long session is still worth not having).
+    expect(jest.getTimerCount()).toBe(0);
+  });
 });

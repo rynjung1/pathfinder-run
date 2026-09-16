@@ -347,6 +347,38 @@ function showErrorAlert(title, actionHint, err) {
   Alert.alert(title, `${actionHint} (${String(err.message || err)})`);
 }
 
+// Plain fetch() has no default timeout in React Native -- found on a
+// sweep: every one of this file's 5 fetch calls could hang indefinitely
+// on a bad connection (weak signal, a captive portal, a cellular network
+// that silently drops packets instead of resetting the connection), and
+// three of them back a full-screen spinner with no cancel button
+// (generateRoute's "Generating route...", handleReportClosure's, and
+// openHistory's "Loading..."). Without this, the only way out of a truly
+// hung request was force-quitting the app -- no auto-recovery, no way to
+// even retry. AbortController is the standard fetch-cancellation
+// mechanism; this wraps it once so every call site gets the same bound
+// rather than reimplementing it 5 times.
+export const FETCH_TIMEOUT_MS = 15000;
+
+export async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    // React Native's fetch throws a DOMException named 'AbortError' on
+    // abort -- its own .message ("Aborted") wouldn't tell a user (via
+    // showErrorAlert, which appends err.message verbatim) anything about
+    // WHY, so this is remapped to something that actually explains it.
+    if (err.name === 'AbortError') {
+      throw new Error(`Request timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Wraps AppInner in SafeAreaProvider -- required for useSafeAreaInsets
 // (AppInner, below) to have anything to read from. Split out from
 // AppInner rather than one component, since a component can't consume
@@ -598,7 +630,7 @@ function AppInner() {
       const position = await Location.getCurrentPositionAsync({});
       const { latitude, longitude } = position.coords;
 
-      const response = await fetch(`${API_BASE_URL}/route`, {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/route`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
         body: JSON.stringify({ lat: latitude, lon: longitude, distance }),
@@ -925,7 +957,7 @@ function AppInner() {
 
   async function syncRunToServer(run) {
     const deviceId = await getOrCreateDeviceId();
-    const response = await fetch(`${API_BASE_URL}/runs`, {
+    const response = await fetchWithTimeout(`${API_BASE_URL}/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
       body: JSON.stringify({
@@ -959,7 +991,7 @@ function AppInner() {
         const position = await Location.getCurrentPositionAsync({});
         coord = { latitude: position.coords.latitude, longitude: position.coords.longitude };
       }
-      const response = await fetch(`${API_BASE_URL}/closures`, {
+      const response = await fetchWithTimeout(`${API_BASE_URL}/closures`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
         body: JSON.stringify({ lat: coord.latitude, lon: coord.longitude }),
@@ -1001,7 +1033,7 @@ function AppInner() {
       let merged = runs;
       try {
         const deviceId = await getOrCreateDeviceId();
-        const response = await fetch(`${API_BASE_URL}/runs?deviceId=${encodeURIComponent(deviceId)}`, {
+        const response = await fetchWithTimeout(`${API_BASE_URL}/runs?deviceId=${encodeURIComponent(deviceId)}`, {
           headers: { 'X-API-Key': API_KEY },
         });
         if (response.ok) {
@@ -1065,7 +1097,7 @@ function AppInner() {
               await deleteAllRuns();
               try {
                 const deviceId = await getOrCreateDeviceId();
-                const response = await fetch(`${API_BASE_URL}/runs`, {
+                const response = await fetchWithTimeout(`${API_BASE_URL}/runs`, {
                   method: 'DELETE',
                   headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
                   body: JSON.stringify({ deviceId }),
