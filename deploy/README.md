@@ -1,12 +1,19 @@
 # Deployment notes
 
-Not run yet -- provisioning (step 4) is on hold pending a VPS and a
-domain (Caddy's automatic HTTPS needs one; it can't issue a cert for a
-bare IP). Everything short of that is actually ready now, not just
-planned: the two systemd units, `deploy/Caddyfile` (syntax-validated
-with the real `caddy` binary), and the install steps below exist so
-that once a VPS and domain exist, this is "follow this," not "figure
-this out."
+**Live as of 2026-09-18**: `https://api.pathfinderrun.com` (Hetzner
+CX23, Helsinki -- Oracle Cloud's free-tier Ampere capacity was tried
+first and abandoned after a real, sustained "out of capacity" error
+across multiple retries and hours, not a one-off). Verified end-to-end
+against the real deployment, not just "the process started": a real
+POST /route over HTTPS returns real generated candidates, and `/health`
+reports `{"status": "ok"}` (which itself only reports ok when it can
+actually reach GraphHopper, per that endpoint's own design -- see
+`scripts/route_api.py`).
+
+The install steps below are the exact commands actually run to get
+there, kept here for the next time this needs to be redone (a VPS
+rebuild, a second environment, disaster recovery) -- not a plan
+anymore, a record.
 
 ## VPS sizing
 
@@ -76,7 +83,7 @@ README for the exact command). Once the graph-cache exists, *serving*
 it is unchanged -- still the plain, unmodified `graphhopper-web.jar`
 via `run-graphhopper.sh`; the custom code only ever runs at import time.
 
-## Install steps (once a domain is sorted and step 4 resumes)
+## Install steps (as actually run)
 
 1. Clone the repo to `/opt/pathfinder-run`, create the `pathfinder` user.
 2. `python3 -m venv venv && venv/bin/pip install -r scripts/requirements.txt`
@@ -91,18 +98,22 @@ via `run-graphhopper.sh`; the custom code only ever runs at import time.
    (503 + `{"status": "degraded", ...}` if it can't reach it), not just
    "the process started," so it's worth checking again any time
    GraphHopper restarts independently of this service.
-8. Firewall: allow only 22 (SSH) and 443 (HTTPS, once Caddy is in front)
-   inbound. Nothing else -- GraphHopper (8995/8996) and route_api.py
+8. Firewall (`ufw`): allow 22 (SSH), 80, and 443 inbound. 80 is not a
+   mistake -- Caddy needs it for the ACME HTTP challenge and to redirect
+   plain HTTP to HTTPS (see `deploy/Caddyfile`'s own header comment).
+   Nothing else -- GraphHopper (8995/8996) and route_api.py
    (127.0.0.1:5001) are both intentionally not internet-reachable
    directly; Caddy is the only public surface.
 9. Caddy: install it (see `deploy/Caddyfile`'s header comment for the
    exact apt commands), fill in the real domain in place of that file's
    `api.example.com` placeholder, `sudo cp deploy/Caddyfile
-   /etc/caddy/Caddyfile && sudo systemctl reload caddy`. Validated with
-   the real `caddy validate` locally (adapts cleanly to JSON); the only
-   thing that's genuinely blocked on having a domain is Let's Encrypt
-   issuing the cert, which happens automatically the moment Caddy sees
-   a real hostname in the site block instead of the placeholder.
+   /etc/caddy/Caddyfile && sudo systemctl reload caddy`. Real gotcha hit
+   doing this: Caddy's Debian package does NOT create
+   `/var/log/caddy/` itself, and the site block's `log { output file
+   ... }` directive fails closed (the whole reload fails, not just
+   logging) if that directory doesn't exist with the right owner --
+   `sudo mkdir -p /var/log/caddy && sudo chown caddy:caddy
+   /var/log/caddy` before the reload, not after hitting the error.
 
 ## Backups
 

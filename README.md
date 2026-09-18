@@ -17,7 +17,7 @@ v1 and v2 core scope (see [`docs/running-app-architecture.md`](docs/running-app-
 - Crowdsourced closure reporting, matched to OSM edges and fed into the routing cost (`scripts/closures.py`).
 - Run history: local SQLite storage, replay of a past run's actual recorded GPS trace on a map, and a best-effort device-scoped sync to the server for durability (`mobile/db.js`, `scripts/runs.py`) — no user accounts, so this doesn't survive an app reinstall; see `runs.py`'s module docstring for the honest scope.
 
-Also done: a pre-deployment hardening pass (API-key auth, per-IP rate limiting, input caps, a production WSGI server — `scripts/route_api.py`, `scripts/serve.py`). Actual VPS deployment hasn't happened yet — it's blocked on a domain (HTTPS needs one; see [`deploy/README.md`](deploy/README.md) for the concrete, ready-to-run plan). v3 (background/`Always` location) is a deliberate not-yet, not an oversight — see the file header of `mobile/App.js` for why.
+Also done: a pre-deployment hardening pass (API-key auth, per-IP rate limiting, input caps, a production WSGI server — `scripts/route_api.py`, `scripts/serve.py`). **Live in production** as of 2026-09-18: `https://api.pathfinderrun.com` (Hetzner CX23, real Let's Encrypt HTTPS via Caddy) — see [`deploy/README.md`](deploy/README.md) for the exact steps run to get there. v3 (background/`Always` location) is a deliberate not-yet, not an oversight — see the file header of `mobile/App.js` for why.
 
 Real automated test coverage across the whole stack, not just the mobile geometry helpers it started with: Python (backend endpoints, closures, run storage, the route-scoring/GeoJSON output), the mobile client (including `db.js`'s SQLite logic, backed in tests by a real embedded SQLite engine rather than a mock, since `expo-sqlite` itself can't load under Jest), and `graphhopper-ext`'s Java extension — all three run in CI on every push ([`.github/workflows/test.yml`](.github/workflows/test.yml)), not just locally.
 
@@ -69,7 +69,7 @@ See `mobile/App.js`'s file header for the `API_BASE_URL` addressing notes (Simul
 
 ### Deploying for real
 
-Not done yet — see [`deploy/README.md`](deploy/README.md) for the concrete plan (systemd units, layout, what's blocked and on what).
+Done — live at `https://api.pathfinderrun.com` (Hetzner CX23, Helsinki). See [`deploy/README.md`](deploy/README.md) for the exact install steps and the real gotchas hit doing it (Caddy's log directory, Oracle Cloud's free-tier capacity exhaustion).
 
 ### App Store readiness
 
@@ -77,7 +77,7 @@ For the actual order to do these in, not just the list of facts below, see [`doc
 
 Beyond backend deployment, submitting to the App Store/Play Store needs:
 - **Apple Developer Program enrollment** ($99/year) and an App Store Connect account — not something code can do, needs to happen directly.
-- **A reachable production backend** — a release build can't point at `localhost`; this is the same VPS/domain blocker as backend deployment above.
+- **A reachable production backend** — done, see "Deploying for real" above. The only remaining step is pointing the mobile app's production build at it (`eas env:set --name EXPO_PUBLIC_API_BASE_URL --value https://api.pathfinderrun.com --environment production`), then a fresh `eas build`.
 - **App Store Connect listing copy** (name, subtitle, promotional text, description, keywords, category, age rating): drafted and ready to copy-paste in [`docs/app-store-listing.md`](docs/app-store-listing.md), character/byte counts verified against Apple's real field limits, not estimated. The one thing it can't fill in: a real Support URL, since that needs to actually be reachable — that file names a concrete, honest option (the public GitHub repo) rather than leave a placeholder.
 - **App Store screenshots**: two real ones exist ([`docs/app-store-screenshots/`](docs/app-store-screenshots/)) — captured from an actual running build against the real backend, at exactly Apple's required 6.9" resolution (1320×2868, verified), not mockups. Covers the main route-generation screen in both light and dark mode; a fuller set (post-run summary, past-runs replay) needs tapping through a live run on a real device or simulator, which wasn't possible in this environment.
 - **Privacy policy**: drafted and published — https://claude.ai/code/artifact/b1f491f0-5c0c-4454-8c93-17ca88adf517 — describes the app's actual data handling (location, run history, device-scoped sync, deletion), with a real contact email now filled in. Needs to be pasted into App Store Connect's/Play Console's privacy policy URL fields at submission time.

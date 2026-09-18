@@ -30,10 +30,7 @@
 # which Caddy does automatically for any site block using a real
 # hostname (not needed/added explicitly below).
 
-# TODO: replace with the real domain once one is registered and its DNS
-# A record points at this VPS. Everything below this line is otherwise
-# ready to use as-is.
-api.example.com {
+api.pathfinderrun.com {
 	# route_api.py/serve.py binds 127.0.0.1:5001 only (see serve.py's own
 	# module docstring) -- Caddy is the sole public-facing surface, exactly
 	# as deploy/README.md's firewall section (step 8) assumes.
