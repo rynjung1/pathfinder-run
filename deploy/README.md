@@ -117,13 +117,36 @@ via `run-graphhopper.sh`; the custom code only ever runs at import time.
 
 ## Backups
 
-Only `scripts/closures.db` needs one -- everything else here is a build
-artifact, reproducible from this repo plus the raw OSM extract (see the
-hardening review). A simple daily cron is enough at this write volume:
+**Set up and verified working** (`/etc/cron.d/pathfinder-backups`):
 
 ```
-0 3 * * * sqlite3 /opt/pathfinder-run/scripts/closures.db ".backup /opt/pathfinder-run/backups/closures-$(date +\%F).db"
+0 3 * * * pathfinder sqlite3 /opt/pathfinder-run/scripts/closures.db ".backup /opt/pathfinder-run/backups/closures-$(date +\%F).db"
+30 3 * * * root find /opt/pathfinder-run/backups -name 'closures-*.db' -mtime +14 -delete
 ```
 
-with a second job pruning anything older than, say, 14 days. Not set up
-yet -- this is the concrete command for whenever step 4 resumes.
+Only `scripts/closures.db` -- `runs.db` deliberately doesn't get one:
+the server-side run-history sync is explicitly a best-effort backup
+layer on top of each device's own local (authoritative) copy, per
+`mobile/db.js`/`scripts/runs.py`'s own documented design -- losing the
+server's `runs.db` loses nothing a user doesn't already have on their
+own phone. `closures.db` is the one table with no other copy anywhere,
+which is what actually makes it worth backing up. Tested directly
+(not just trusted to work at 3am): ran the exact backup command by
+hand, confirmed the output file is a real, readable SQLite database
+with the right schema.
+
+## Server hardening (done beyond the base install steps)
+
+- **SSH password authentication disabled** (`/etc/ssh/sshd_config.d/
+  99-pathfinder-hardening.conf`, `PasswordAuthentication no`) -- root
+  login already required a key (`prohibit-password`, the Ubuntu cloud
+  image default), but password auth was still enabled system-wide,
+  meaning the internet's constant background SSH brute-force noise was
+  actually being given a login prompt to try against. Verified key-based
+  access still works before considering this done, not after.
+- **fail2ban** installed and running (its default `sshd` jail is enough
+  here -- no other services listen on a public port except Caddy, which
+  isn't a fail2ban-relevant login surface).
+- **Automatic security updates**: already on by default on this Ubuntu
+  cloud image (`unattended-upgrades`, confirmed enabled, not assumed) --
+  nothing to add.
