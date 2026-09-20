@@ -150,3 +150,13 @@ with the right schema.
 - **Automatic security updates**: already on by default on this Ubuntu
   cloud image (`unattended-upgrades`, confirmed enabled, not assumed) --
   nothing to add.
+- **Caddy access log rotation** (`/etc/logrotate.d/caddy-pathfinder`,
+  daily, 14 rotations, compressed): Caddy's Debian package does not set
+  this up itself -- `/var/log/caddy/pathfinder-run-access.log` would
+  otherwise grow completely unbounded forever. Validated with
+  `logrotate -d` (dry run) before trusting it, not just written and
+  assumed correct.
+- **systemd journal size cap** (`SystemMaxUse=500M` in
+  `/etc/systemd/journald.conf`) -- no cap existed before; harmless today
+  (33GB free, 68MB of journal so far) but cheap insurance against
+  unbounded growth over the app's actual lifetime.
