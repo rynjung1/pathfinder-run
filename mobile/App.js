@@ -318,7 +318,13 @@ function useTheme() {
 // #8B4513, kept distinct from primary/destructive since "report a
 // closure" is neither). minHeight 48 on buttonBase covers both
 // platforms' minimums regardless of title length/font scaling.
-function AppButton({ title, onPress, variant = 'primary', disabled = false }) {
+// size="small" (used for Pause/End Run/Report closure during an active
+// run, found on a direct ask: the live stats should be what draws the
+// eye during a run, not the controls) still respects iOS's real 44pt
+// minimum tap-target height -- shrinking to something smaller than that
+// would trade a visual nicety for an actual accessibility regression,
+// which isn't the ask here.
+function AppButton({ title, onPress, variant = 'primary', disabled = false, size = 'normal' }) {
   const colors = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const variantStyles = {
@@ -328,16 +334,18 @@ function AppButton({ title, onPress, variant = 'primary', disabled = false }) {
     closure: [styles.buttonClosure, styles.buttonClosureText],
   };
   const [containerStyle, textStyle] = variantStyles[variant];
+  const sizeContainerStyle = size === 'small' ? styles.buttonBaseSmall : null;
+  const sizeTextStyle = size === 'small' ? styles.buttonBaseTextSmall : null;
   return (
     <TouchableOpacity
       onPress={onPress}
       disabled={disabled}
-      style={[styles.buttonBase, containerStyle, disabled && styles.buttonDisabled]}
+      style={[styles.buttonBase, sizeContainerStyle, containerStyle, disabled && styles.buttonDisabled]}
       accessibilityRole="button"
       accessibilityLabel={title}
       accessibilityState={{ disabled }}
     >
-      <Text style={[styles.buttonBaseText, textStyle]}>{title}</Text>
+      <Text style={[styles.buttonBaseText, sizeTextStyle, textStyle]}>{title}</Text>
     </TouchableOpacity>
   );
 }
@@ -1682,24 +1690,59 @@ function AppInner() {
             {/* §3's "make it visible when a run is being recorded ...
                 never track silently" -- the buttons below already implied
                 a run was active, but nothing showed the live distance/
-                duration a "recording" indicator should. */}
-            <Text style={styles.recordingIndicator}>
-              ● Recording -- {formatDistance(liveDistanceM)} · {formatDuration(liveDurationMs)}
-            </Text>
+                duration a "recording" indicator should.
+                Found on a direct ask: the live stats (not the controls)
+                should be what actually draws the eye during a run --
+                redesigned as a big three-stat row (matching the post-run
+                summary's own Distance/Time/Pace layout, just larger,
+                since this is the primary, continuously-updating display
+                a runner glances at mid-run) with Pause/End Run shrunk to
+                size="small" so they read as secondary controls, not the
+                focal point. Pace wasn't computed live at all before --
+                only ever shown after End Run -- reusing formatPace on
+                liveDistanceM/liveDurationMs the same way lastRun's does
+                after finishing, not new math. */}
+            <Text style={styles.liveStatusLabel}>● Recording</Text>
+            <View style={styles.liveStatsRow}>
+              <View style={styles.summaryStat}>
+                <Text style={styles.liveStatValue}>{formatDistance(liveDistanceM)}</Text>
+                <Text style={styles.summaryStatLabel}>Distance</Text>
+              </View>
+              <View style={styles.summaryStat}>
+                <Text style={styles.liveStatValue}>{formatDuration(liveDurationMs)}</Text>
+                <Text style={styles.summaryStatLabel}>Time</Text>
+              </View>
+              <View style={styles.summaryStat}>
+                <Text style={styles.liveStatValue}>{formatPace(liveDistanceM, liveDurationMs)}</Text>
+                <Text style={styles.summaryStatLabel}>Pace</Text>
+              </View>
+            </View>
             <View style={styles.buttonRow}>
-              <AppButton title="Pause" variant="secondary" onPress={handlePause} />
-              <AppButton title="End Run" variant="destructive" onPress={handleEnd} />
+              <AppButton title="Pause" variant="secondary" size="small" onPress={handlePause} />
+              <AppButton title="End Run" variant="destructive" size="small" onPress={handleEnd} />
             </View>
           </>
         )}
         {sessionState === 'paused' && (
           <>
-            <Text style={styles.recordingIndicator}>
-              ⏸ Paused -- {formatDistance(liveDistanceM)} · {formatDuration(liveDurationMs)}
-            </Text>
+            <Text style={styles.liveStatusLabel}>⏸ Paused</Text>
+            <View style={styles.liveStatsRow}>
+              <View style={styles.summaryStat}>
+                <Text style={styles.liveStatValue}>{formatDistance(liveDistanceM)}</Text>
+                <Text style={styles.summaryStatLabel}>Distance</Text>
+              </View>
+              <View style={styles.summaryStat}>
+                <Text style={styles.liveStatValue}>{formatDuration(liveDurationMs)}</Text>
+                <Text style={styles.summaryStatLabel}>Time</Text>
+              </View>
+              <View style={styles.summaryStat}>
+                <Text style={styles.liveStatValue}>{formatPace(liveDistanceM, liveDurationMs)}</Text>
+                <Text style={styles.summaryStatLabel}>Pace</Text>
+              </View>
+            </View>
             <View style={styles.buttonRow}>
-              <AppButton title="Resume" variant="primary" onPress={handleResume} />
-              <AppButton title="End Run" variant="destructive" onPress={handleEnd} />
+              <AppButton title="Resume" variant="primary" size="small" onPress={handleResume} />
+              <AppButton title="End Run" variant="destructive" size="small" onPress={handleEnd} />
             </View>
           </>
         )}
@@ -1788,6 +1831,15 @@ function createStyles(colors, insets = { top: 0, bottom: 0, left: 0, right: 0 })
     fontSize: 16,
     fontWeight: '600',
   },
+  buttonBaseSmall: {
+    minHeight: 44, // iOS HIG's real minimum tap-target height -- smaller than buttonBase's 48, but not below the accessible floor
+    minWidth: 72,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+  },
+  buttonBaseTextSmall: {
+    fontSize: 14,
+  },
   buttonDisabled: {
     opacity: 0.5,
   },
@@ -1854,12 +1906,26 @@ function createStyles(colors, insets = { top: 0, bottom: 0, left: 0, right: 0 })
     color: colors.textSecondary,
     marginBottom: 10,
   },
-  recordingIndicator: {
+  liveStatusLabel: {
     textAlign: 'center',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     color: colors.accentForeground,
-    marginBottom: 10,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  liveStatsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-evenly',
+    width: '100%',
+    marginBottom: 16,
+  },
+  liveStatValue: {
+    fontSize: 30,
+    fontWeight: '700',
+    color: colors.text,
+    fontVariant: ['tabular-nums'],
   },
   distanceChip: {
     borderWidth: 1,

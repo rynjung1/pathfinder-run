@@ -467,13 +467,19 @@ test('Delete All My Data clears local runs and calls the server DELETE endpoint'
   expect(JSON.parse(deleteCall[1].body)).toEqual({ deviceId: 'test-device-id' });
 });
 
-test('starting a run shows a live Recording indicator that updates as GPS points come in', async () => {
+test('starting a run shows live Distance/Time/Pace stats that update as GPS points come in', async () => {
+  // Found on a direct ask: the live stats (not the controls) should be
+  // the focal point during a run -- redesigned from one combined
+  // "Recording -- 0.63 km · 0:05" line into three separate large stat
+  // values (matching the post-run summary's own layout), and pace is
+  // now computed live too, not just after End Run.
   render(<App />);
   await waitFor(() => screen.getByText(/Selected: #1/));
 
   fireEvent.press(screen.getByText('Start Run'));
+  await waitFor(() => screen.getByText('● Recording'));
   // No GPS points yet -- a single-point trace has no distance to sum.
-  await waitFor(() => screen.getByText(/Recording.*0\.00 km/));
+  expect(screen.getByText('0.00 km')).toBeTruthy();
 
   // Two pings, ~630m apart (0.0057° latitude at this longitude) -- enough
   // points for traceDistanceMeters (geometry.js) to have a real consecutive
@@ -486,13 +492,18 @@ test('starting a run shows a live Recording indicator that updates as GPS points
     watchCallback({ coords: { latitude: 43.47, longitude: -80.5204 }, timestamp: Date.now() });
   });
 
-  await waitFor(() => expect(screen.queryByText(/Recording.*0\.00 km/)).toBeNull());
-  expect(screen.getByText(/Recording.*0\.6\d km/)).toBeTruthy();
+  await waitFor(() => expect(screen.queryByText('0.00 km')).toBeNull());
+  expect(screen.getByText(/0\.6\d km/)).toBeTruthy();
+  // A real, non-placeholder pace once there's real distance and elapsed
+  // time -- not the "--:-- /km" zero-distance placeholder anymore.
+  expect(screen.queryByText('--:-- /km')).toBeNull();
+  expect(screen.getByText(/^\d+:\d{2} \/km$/)).toBeTruthy();
 
   // Pause freezes the label (Paused, not Recording) but keeps showing the
   // same accumulated distance -- doesn't reset to 0.
   fireEvent.press(screen.getByText('Pause'));
-  await waitFor(() => screen.getByText(/Paused.*0\.6\d km/));
+  await waitFor(() => screen.getByText('⏸ Paused'));
+  expect(screen.getByText(/0\.6\d km/)).toBeTruthy();
 });
 
 test('backgrounding the app mid-run auto-pauses it, the same as tapping Pause', async () => {
@@ -518,7 +529,7 @@ test('backgrounding the app mid-run auto-pauses it, the same as tapping Pause', 
   await waitFor(() => screen.getByText(/Selected: #1/));
 
   fireEvent.press(screen.getByText('Start Run'));
-  await waitFor(() => screen.getByText(/Recording.*0\.00 km/));
+  await waitFor(() => screen.getByText('● Recording'));
   expect(appStateCallback).toBeTruthy();
 
   await act(async () => {
@@ -527,7 +538,7 @@ test('backgrounding the app mid-run auto-pauses it, the same as tapping Pause', 
   await act(async () => {
     watchCallback({ coords: { latitude: 43.47, longitude: -80.5204 }, timestamp: Date.now() });
   });
-  await waitFor(() => screen.getByText(/Recording.*0\.6\d km/));
+  await waitFor(() => screen.getByText(/0\.6\d km/));
 
   // Simulate iOS backgrounding the app (no UIBackgroundMode: location, so
   // JS suspends almost immediately) -- should auto-pause exactly like a
@@ -538,7 +549,8 @@ test('backgrounding the app mid-run auto-pauses it, the same as tapping Pause', 
   await act(async () => {
     appStateCallback('background');
   });
-  await waitFor(() => screen.getByText(/Paused.*0\.6\d km/));
+  await waitFor(() => screen.getByText('⏸ Paused'));
+  expect(screen.getByText(/0\.6\d km/)).toBeTruthy();
 
   // Coming back to the foreground must NOT auto-resume -- resuming a run
   // silently would defeat the whole point (the user should consciously
@@ -546,7 +558,8 @@ test('backgrounding the app mid-run auto-pauses it, the same as tapping Pause', 
   await act(async () => {
     appStateCallback('active');
   });
-  expect(screen.getByText(/Paused.*0\.6\d km/)).toBeTruthy();
+  expect(screen.getByText('⏸ Paused')).toBeTruthy();
+  expect(screen.getByText(/0\.6\d km/)).toBeTruthy();
 });
 
 test('tapping Start Run does not enter Recording if location permission was revoked since the route was generated', async () => {
@@ -601,27 +614,31 @@ test('resuming a paused run does not enter Recording (or leave the live clock ru
   await waitFor(() => screen.getByText(/Selected: #1/));
 
   fireEvent.press(screen.getByText('Start Run'));
-  await waitFor(() => screen.getByText(/Recording/));
+  await waitFor(() => screen.getByText('● Recording'));
   fireEvent.press(screen.getByText('Pause'));
-  await waitFor(() => screen.getByText(/Paused/));
+  await waitFor(() => screen.getByText('⏸ Paused'));
 
   Location.getForegroundPermissionsAsync.mockResolvedValueOnce({ status: 'denied' });
   jest.spyOn(Alert, 'alert').mockImplementation(() => {});
-  const pausedDurationText = screen.getByText(/Paused.*\d+:\d{2}/).children.join('');
+  // The Time stat is now its own standalone element (not mixed into a
+  // combined "Paused -- ... 0:05" string) -- bare "M:SS" with nothing
+  // else uniquely identifies it among the three live stats (Distance
+  // always has " km", Pace always has " /km").
+  const pausedDurationText = screen.getByText(/^\d+:\d{2}$/).children.join('');
 
   await act(async () => {
     fireEvent.press(screen.getByText('Resume'));
   });
 
   await waitFor(() => expect(Alert.alert).toHaveBeenCalled());
-  expect(screen.queryByText(/Recording/)).toBeNull();
+  expect(screen.queryByText('● Recording')).toBeNull();
   expect(screen.getByText('Resume')).toBeTruthy();
 
   // The displayed duration must still be frozen, not silently climbing --
   // this is the actual regression this test guards against, not just
   // "still says Paused".
   await new Promise((resolve) => setTimeout(resolve, 1100));
-  expect(screen.getByText(/Paused/).children.join('')).toBe(pausedDurationText);
+  expect(screen.getByText(/^\d+:\d{2}$/).children.join('')).toBe(pausedDurationText);
 });
 
 test("a failed save deletes the run's already-captured map snapshot, so it isn't orphaned on disk forever", async () => {
