@@ -155,6 +155,35 @@ test('rank 1 is selected by default after a route is generated', async () => {
   expect(screen.getByText(/2\.99 km/)).toBeTruthy(); // rank 1's 2988.28m
 });
 
+test('each route request sends a fresh random bearing, so repeat requests actually explore different directions', async () => {
+  // Found on a direct ask: the app always returned the exact same routes
+  // for the same start point and distance. Root cause: route_api.py's
+  // /route already accepts an optional bearing (the starting compass
+  // direction its candidates fan out from) and defaults to due north if
+  // omitted -- this app was always omitting it, so the same fixed set of
+  // directions got explored on every single request. A real fix has to
+  // send a genuinely different bearing each time, not just "a" bearing.
+  render(<App />);
+  await waitFor(() => screen.getByText(/Selected: #1/));
+  fireEvent.press(screen.getByText('Regenerate'));
+  await waitFor(() => screen.getByText(/Selected: #1/));
+
+  const routeCalls = global.fetch.mock.calls.filter(([url]) => url.endsWith('/route'));
+  expect(routeCalls).toHaveLength(2);
+  const bearings = routeCalls.map(([, opts]) => JSON.parse(opts.body).bearing);
+
+  for (const bearing of bearings) {
+    expect(typeof bearing).toBe('number');
+    expect(bearing).toBeGreaterThanOrEqual(0);
+    expect(bearing).toBeLessThan(360);
+  }
+  // Two independently-random bearings in [0, 360) landing on the exact
+  // same float is astronomically unlikely -- a real, meaningful check
+  // that this isn't just "some fixed non-zero constant" masquerading as
+  // random, not a flaky test.
+  expect(bearings[0]).not.toBe(bearings[1]);
+});
+
 test('a brand-new install (permission never asked before) sees an in-app explanation before the OS dialog, not a surprise system prompt on launch', async () => {
   // Found on a sweep: the mount effect used to call generateRoute()
   // (whose own first move is requestForegroundPermissionsAsync)

@@ -817,10 +817,24 @@ function AppInner() {
       const position = await getCurrentPositionWithTimeout();
       const { latitude, longitude } = position.coords;
 
+      // Found on a direct ask: this app always returned the exact same
+      // routes for the same start point and distance, request after
+      // request. Root cause: route_api.py's /route already accepts an
+      // optional "bearing" (the starting compass direction its 6
+      // evenly-spaced candidates fan out from -- see that file's own
+      // docstring), defaulting to 0 (due north) if omitted -- and this
+      // was always omitting it. Since the underlying road network never
+      // changes between requests, a fixed starting bearing meant a fixed
+      // set of 6 directions explored every single time, so of course the
+      // same candidates came back. A fresh random bearing on every call
+      // (including Regenerate, not just the first request) actually
+      // explores a different 6 directions each time -- real variety,
+      // using functionality the backend already had and was tested, not
+      // a new feature on that end.
       const response = await fetchWithTimeout(`${API_BASE_URL}/route`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
-        body: JSON.stringify({ lat: latitude, lon: longitude, distance }),
+        body: JSON.stringify({ lat: latitude, lon: longitude, distance, bearing: Math.random() * 360 }),
       });
       // .catch(() => ({})), not a bare await -- found a real bug while
       // auditing the backend: flask-limiter's default 429 response is
