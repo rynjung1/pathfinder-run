@@ -1,5 +1,5 @@
 import { Component, useState, useEffect, useMemo, useRef } from 'react';
-import { StyleSheet, Text, View, ActivityIndicator, Alert, AppState, FlatList, TouchableOpacity, Image, useColorScheme } from 'react-native';
+import { StyleSheet, Text, View, ActivityIndicator, Alert, AppState, FlatList, TouchableOpacity, TextInput, Image, useColorScheme } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Location from 'expo-location';
 import { Accelerometer } from 'expo-sensors';
@@ -135,12 +135,22 @@ const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || 'http://localhost:5
 // (30km, see that file) -- this was purely a missing client-side control,
 // not a backend limitation. DEFAULT_TARGET_DISTANCE_M seeds targetDistanceM
 // (state, below) so the existing "auto-generate a route on launch"
-// convenience is unchanged; DISTANCE_PRESETS_M drives the picker shown
-// once a route exists (see the 'ready' state's render) -- plain preset
-// buttons, not a slider/numeric input, to match this app's existing
-// all-stock-Button UI and avoid a new native dependency for this.
+// convenience is unchanged; DISTANCE_PRESETS_M drives the quick-pick chips
+// shown once a route exists (see the 'ready' state's render).
+//
+// A "Custom" chip (below, alongside the presets) also lets someone type an
+// exact distance instead of picking a preset -- found worth adding on a
+// direct ask: presets cover the common training distances most runners
+// think in terms of, but someone with a specific target (a race taper, a
+// route matching exactly what they ran yesterday) has no way to express
+// that otherwise. Uses TextInput, a core React Native component, not a
+// new native dependency -- the file's original "avoid a new native
+// dependency" reasoning for skipping a numeric input doesn't actually
+// apply to this.
 const DEFAULT_TARGET_DISTANCE_M = 5000;
 const DISTANCE_PRESETS_M = [3000, 5000, 8000, 10000];
+const MIN_CUSTOM_DISTANCE_M = 500; // sane floor -- generate_loop.py's own degenerate-route floor is a fraction of target, not a fixed value, so this is a separate, simpler client-side sanity check, not a mirror of that logic
+const MAX_CUSTOM_DISTANCE_M = 30000; // matches route_api.py's real MAX_DISTANCE_M exactly -- validating client-side against a number the client made up would just mean a further, confusing 400 from the server instead of an immediate, clear in-app message
 
 // route_api.py's pre-deployment hardening pass added a required X-API-Key
 // header (see that commit's route_api.py docstring) but this client was
@@ -586,6 +596,15 @@ function AppInner() {
   // See DEFAULT_TARGET_DISTANCE_M/DISTANCE_PRESETS_M above -- this is the
   // one place "how far" actually lives now, instead of a fixed constant.
   const [targetDistanceM, setTargetDistanceM] = useState(DEFAULT_TARGET_DISTANCE_M);
+  // Custom-distance input state -- showCustomDistanceInput toggles the
+  // TextInput on/off (starts hidden so the common case, tapping a preset
+  // chip, isn't cluttered by a text field nobody asked for);
+  // customDistanceText is the raw, unvalidated string the user is typing,
+  // kept separate from targetDistanceM itself so an in-progress, not-yet-
+  // submitted edit (e.g. "7" while typing toward "7.5") never triggers a
+  // route regeneration or gets silently coerced mid-keystroke.
+  const [showCustomDistanceInput, setShowCustomDistanceInput] = useState(false);
+  const [customDistanceText, setCustomDistanceText] = useState('');
   // The just-finished run, for the post-run summary (sessionState ===
   // 'done', below) -- set once, in handleEnd. Deliberately not read from
   // liveDistanceM/liveDurationMs for this: those are only meaningful
@@ -852,6 +871,33 @@ function AppInner() {
   }
 
   function selectDistance(meters) {
+    generateRoute(meters);
+  }
+
+  // Parses customDistanceText (typed in km, matching the preset chips'
+  // own "Xkm" labels -- entering meters directly would be inconsistent
+  // with everything else on this screen) and, if valid, generates a
+  // route at that exact distance the same way tapping a preset chip
+  // does. Validated client-side against the same MIN/MAX_CUSTOM_DISTANCE_M
+  // the server would itself reject outside of, so a bad value gets an
+  // immediate, specific in-app message instead of a round trip just to
+  // learn the same thing from a 400.
+  function submitCustomDistance() {
+    const km = Number(customDistanceText);
+    if (!customDistanceText || Number.isNaN(km) || km <= 0) {
+      Alert.alert('Enter a distance', 'Type a number of kilometers, e.g. 7.5.');
+      return;
+    }
+    const meters = Math.round(km * 1000);
+    if (meters < MIN_CUSTOM_DISTANCE_M || meters > MAX_CUSTOM_DISTANCE_M) {
+      Alert.alert(
+        'Distance out of range',
+        `Enter a distance between ${MIN_CUSTOM_DISTANCE_M / 1000} and ${MAX_CUSTOM_DISTANCE_M / 1000} km.`
+      );
+      return;
+    }
+    setShowCustomDistanceInput(false);
+    setCustomDistanceText('');
     generateRoute(meters);
   }
 
@@ -1558,14 +1604,19 @@ function AppInner() {
                 place that's actually possible now, instead of a silent
                 fixed 5km forever. Tapping a preset regenerates at that
                 distance immediately, same as Regenerate but at a new
-                target -- see DISTANCE_PRESETS_M/selectDistance above. */}
+                target -- see DISTANCE_PRESETS_M/selectDistance above.
+                "Custom" alongside them opens a plain numeric entry for an
+                exact distance, for anyone the four presets don't cover. */}
             <View style={styles.buttonRow}>
               {DISTANCE_PRESETS_M.map((meters) => {
                 const isSelected = meters === targetDistanceM;
                 return (
                   <TouchableOpacity
                     key={meters}
-                    onPress={() => selectDistance(meters)}
+                    onPress={() => {
+                      setShowCustomDistanceInput(false);
+                      selectDistance(meters);
+                    }}
                     style={[styles.distanceChip, isSelected && styles.distanceChipSelected]}
                     accessibilityRole="button"
                     accessibilityLabel={`${meters / 1000} kilometers`}
@@ -1577,7 +1628,35 @@ function AppInner() {
                   </TouchableOpacity>
                 );
               })}
+              <TouchableOpacity
+                onPress={() => setShowCustomDistanceInput((shown) => !shown)}
+                style={[styles.distanceChip, showCustomDistanceInput && styles.distanceChipSelected]}
+                accessibilityRole="button"
+                accessibilityLabel="Custom distance"
+                accessibilityState={{ selected: showCustomDistanceInput }}
+              >
+                <Text style={[styles.distanceChipText, showCustomDistanceInput && styles.distanceChipTextSelected]}>
+                  Custom
+                </Text>
+              </TouchableOpacity>
             </View>
+            {showCustomDistanceInput && (
+              <View style={styles.buttonRow}>
+                <TextInput
+                  style={styles.customDistanceInput}
+                  value={customDistanceText}
+                  onChangeText={setCustomDistanceText}
+                  placeholder="Distance in km"
+                  placeholderTextColor={colors.textSecondary}
+                  keyboardType="decimal-pad"
+                  returnKeyType="go"
+                  onSubmitEditing={submitCustomDistance}
+                  accessibilityLabel="Custom distance in kilometers"
+                  autoFocus
+                />
+                <AppButton title="Go" variant="primary" onPress={submitCustomDistance} />
+              </View>
+            )}
             <View style={styles.buttonRow}>
               <AppButton title="Regenerate" variant="secondary" onPress={() => generateRoute()} />
               <AppButton title="Start Run" variant="primary" onPress={handleStart} />
@@ -1785,6 +1864,17 @@ function createStyles(colors, insets = { top: 0, bottom: 0, left: 0, right: 0 })
   },
   distanceChipTextSelected: {
     color: colors.onAccent,
+  },
+  customDistanceInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    fontSize: 16,
+    color: colors.text,
+    backgroundColor: colors.background,
   },
   summaryContainer: {
     alignItems: 'center',

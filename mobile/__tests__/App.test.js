@@ -294,6 +294,67 @@ test('picking a distance preset regenerates the route requesting that exact dist
   expect(JSON.parse(finalCalls[2][1].body)).toMatchObject({ distance: 3000 });
 });
 
+describe('custom distance input', () => {
+  // Found on a direct ask: the four preset chips don't cover every
+  // distance someone might actually want (a race taper, matching
+  // yesterday's exact route) -- this is the escape hatch for that,
+  // validated client-side against the same bounds route_api.py itself
+  // enforces (MIN/MAX_CUSTOM_DISTANCE_M), so a bad value gets an
+  // immediate, specific in-app message instead of a round trip just to
+  // learn the same thing from a 400.
+
+  test('the input is hidden until "Custom" is tapped, then submitting a valid distance requests exactly that', async () => {
+    render(<App />);
+    await waitFor(() => screen.getByText(/Selected: #1/));
+
+    expect(screen.queryByPlaceholderText('Distance in km')).toBeNull();
+
+    fireEvent.press(screen.getByText('Custom'));
+    const input = screen.getByPlaceholderText('Distance in km');
+    fireEvent.changeText(input, '7.5');
+    fireEvent.press(screen.getByText('Go'));
+
+    await waitFor(() => screen.getByText(/Selected: #1/));
+    const routeCalls = global.fetch.mock.calls.filter(([url]) => url.endsWith('/route'));
+    expect(routeCalls).toHaveLength(2); // the initial auto-generate, then this one
+    expect(JSON.parse(routeCalls[1][1].body)).toMatchObject({ distance: 7500 });
+
+    // Submitting successfully closes the input and clears it -- it
+    // shouldn't linger open with stale text after a successful request.
+    expect(screen.queryByPlaceholderText('Distance in km')).toBeNull();
+  });
+
+  test('an empty or non-numeric entry is rejected with a clear message, and never reaches the network', async () => {
+    jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    render(<App />);
+    await waitFor(() => screen.getByText(/Selected: #1/));
+    global.fetch.mockClear();
+
+    fireEvent.press(screen.getByText('Custom'));
+    fireEvent.press(screen.getByText('Go')); // nothing typed yet
+
+    expect(Alert.alert).toHaveBeenCalledWith('Enter a distance', 'Type a number of kilometers, e.g. 7.5.');
+    expect(global.fetch).not.toHaveBeenCalled();
+    // The input must still be open after a rejected attempt -- so the
+    // user can just fix their entry, not have to reopen it from scratch.
+    expect(screen.getByPlaceholderText('Distance in km')).toBeTruthy();
+  });
+
+  test('a distance outside the valid range is rejected with the real bounds, not a generic message', async () => {
+    jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    render(<App />);
+    await waitFor(() => screen.getByText(/Selected: #1/));
+    global.fetch.mockClear();
+
+    fireEvent.press(screen.getByText('Custom'));
+    fireEvent.changeText(screen.getByPlaceholderText('Distance in km'), '50');
+    fireEvent.press(screen.getByText('Go'));
+
+    expect(Alert.alert).toHaveBeenCalledWith('Distance out of range', 'Enter a distance between 0.5 and 30 km.');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
+
 test('distance chips are real accessible buttons, and accessibilityState tracks which one is selected', async () => {
   // Formalizes the accessibility pass -- these were plain TouchableOpacity
   // wrappers with no accessibilityRole/Label/State before, meaning a
